@@ -1,0 +1,30 @@
+# Credentials and local environment
+**/.env
+!**/.env.example
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/.ssh/
+**/.aws/
+
+# Nested repositories and local tools
+**/.git/
+**/.vscode/
+**/.idea/
+
+# Dependencies and generated output
+**/.venv/
+**/venv/
+**/node_modules/
+**/__pycache__/
+**/.pytest_cache/
+**/dist/
+**/build/
+**/.coverage
+**/htmlcov/
+
+# Operating-system files
+**/.DS_Store
+**/Thumbs.db
+**/desktop.ini

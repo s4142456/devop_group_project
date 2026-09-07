@@ -1,0 +1,42 @@
+# RMIT University Vietnam
+# Course: COSC2767|COSC2805 Systems Deployment and Operations
+# Semester: 2026B
+# Assessment: Assignment 2
+# Author: Le Quoc Trung
+# ID: s4133058
+
+---
+- name: Configure Docker and System Prerequisites across all nodes
+  hosts: all
+  become: true
+  tasks:
+    - name: Ensure base utility packages are installed
+      ansible.builtin.dnf:
+        name:
+          - git
+        state: present
+
+    - name: Install Docker
+      ansible.builtin.dnf:
+        name: docker
+        state: present
+
+    - name: Ensure Docker service is running and enabled
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add ec2-user to docker group
+      ansible.builtin.user:
+        name: ec2-user
+        groups: docker
+        append: true
+
+    - name: Create project workspace directory
+      ansible.builtin.file:
+        path: /home/ec2-user/app
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: '0755'

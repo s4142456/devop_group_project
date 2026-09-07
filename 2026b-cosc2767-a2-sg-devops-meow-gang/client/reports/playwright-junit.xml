@@ -1,0 +1,8 @@
+<testsuites id="" name="" tests="2" failures="0" skipped="0" errors="0" time="8.632219000000001">
+<testsuite name="storefront.spec.js" timestamp="2026-09-03T12:47:44.783Z" hostname="chromium" tests="2" failures="0" skipped="0" time="6.937" errors="0">
+<testcase name="anonymous user can browse the storefront" classname="storefront.spec.js" time="1.479">
+</testcase>
+<testcase name="customer can recover from declined payment and place an order" classname="storefront.spec.js" time="5.458">
+</testcase>
+</testsuite>
+</testsuites>

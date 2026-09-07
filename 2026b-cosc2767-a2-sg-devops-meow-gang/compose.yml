@@ -1,0 +1,71 @@
+services:
+  db:
+    image: postgres:16
+    container_name: rmit-store-db
+    environment:
+      POSTGRES_DB: rmit_store
+      POSTGRES_USER: rmit
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - rmit-store-db-data:/var/lib/postgresql/data
+    networks:
+      - rmit-store-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rmit -d rmit_store"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./server
+    image: rmit-store-backend:local
+    container_name: rmit-store-backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.prod
+      SECRET_KEY: ${SECRET_KEY}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS}
+      DATABASE_URL: postgres://rmit:${POSTGRES_PASSWORD}@db:5432/rmit_store
+      CLIENT_URL: http://localhost:8080
+      SESSION_COOKIE_SECURE: "False"
+      CSRF_COOKIE_SECURE: "False"
+      USE_S3: "True"
+      AWS_STORAGE_BUCKET_NAME: meowgang-media-staging-01
+      AWS_S3_REGION_NAME: us-east-1
+    command: >
+      sh -c "
+      python manage.py migrate &&
+      python manage.py collectstatic --noinput &&
+      gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3
+      "
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - rmit-store-media:/app/media
+    networks:
+      - rmit-store-net
+
+  frontend:
+    build:
+      context: ./client
+    image: rmit-store-frontend:local
+    container_name: rmit-store-frontend
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+    volumes:
+      - rmit-store-media:/usr/share/nginx/html/media:ro
+    networks:
+      - rmit-store-net
+
+volumes:
+  rmit-store-db-data:
+  rmit-store-media:
+
+networks:
+  rmit-store-net:
+

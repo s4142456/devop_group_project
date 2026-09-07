@@ -1,0 +1,15 @@
+# RMIT University Vietnam
+# Course: COSC2767 Systems Deployment and Operations
+# Semester: 2026B
+# Assessment: Assignment 2
+# Author: Ngo Hoang Long
+# ID: s4142456
+# Created date: 03/09/2026
+# Last modified: 03/09/2026
+# Acknowledgement: pytest, pytest-django and pytest-cov documentation.
+
+-r requirements.txt
+
+pytest==9.1.1
+pytest-django==4.14.0
+pytest-cov==7.1.0
