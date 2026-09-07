@@ -20,13 +20,19 @@ This is the **current web application and DevOps project** that the team has bee
 
 Use this directory for current development, testing, deployment, report evidence and the final Assignment 2 deliverables.
 
+## AWS Learner's Lab
+- https://awsacademy.instructure.com/login/canvas
+- email: projectcookit@gmail.com
+- password: @Meowgang26
+
 ## Getting started
 
 1. Read this file to identify the correct directory.
 2. For the original application, open `COSC2767-RMIT-Store-Django-Vue/README.md`.
 3. For the current team project, open `2026b-cosc2767-a2-sg-devops-meow-gang/README.md` and `2026b-cosc2767-a2-sg-devops-meow-gang/APPLICATION_README.md`.
 4. Create local environment files from the supplied `.env.example` files. Actual `.env` files and credentials are not stored in this repository.
-5. Install dependencies from the relevant Python requirements and npm lock files rather than committing `.venv` or `node_modules` directories.
+5. Read A2_TODO_2_COMPLETE.md in 026b-cosc2767-a2-sg-devops-meow-gang/
+6. Install dependencies from the relevant Python requirements and npm lock files rather than committing `.venv` or `node_modules` directories.
 
 ## Repository note
 
