@@ -24,6 +24,7 @@ Use this directory for current development, testing, deployment, report evidence
 - https://awsacademy.instructure.com/login/canvas
 - email: projectcookit@gmail.com
 - password: @Meowgang26
+- private key to ssh to EC2 servers: meowgang-store-staging-key.pem
 
 ## Getting started
 
