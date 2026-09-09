@@ -85,3 +85,4 @@
     - name: Show deployed version
       ansible.builtin.debug:
         msg: "Staging deployed version: {{ version_check.content }}"
+
