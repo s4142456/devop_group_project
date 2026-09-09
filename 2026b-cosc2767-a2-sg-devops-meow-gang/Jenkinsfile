@@ -39,6 +39,8 @@ pipeline {
         ANSIBLE_NOCOLOR = '1'
         BACKEND_IMAGE_NAME = 'meowgang/rmit-store-backend'
         FRONTEND_IMAGE_NAME = 'meowgang/rmit-store-frontend'
+        STAGING_ALLOWED_HOSTS = '127.0.0.1,localhost,172.31.8.77,52.3.160.96'
+        STAGING_CLIENT_URL = 'http://52.3.160.96'
     }
 
     stages {
@@ -672,11 +674,83 @@ pipeline {
             }
         }
 
+        stage('Deploy to Staging') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'STAGING_SSH_KEY',
+                        usernameVariable: 'STAGING_SSH_USER'
+                    ),
+                    string(
+                        credentialsId: 'staging-postgres-password',
+                        variable: 'STAGING_POSTGRES_PASSWORD'
+                    ),
+                    string(
+                        credentialsId: 'staging-django-secret-key',
+                        variable: 'STAGING_SECRET_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+
+                        AWS_ACCOUNT_ID="$(aws sts get-caller-identity \
+                            --query Account \
+                            --output text)"
+
+                        test -n "${AWS_ACCOUNT_ID}"
+                        test "${AWS_ACCOUNT_ID}" != "None"
+
+                        EXTRA_VARS_FILE="$(mktemp)"
+                        trap 'rm -f "${EXTRA_VARS_FILE}"' EXIT
+                        chmod 600 "${EXTRA_VARS_FILE}"
+
+                        cat > "${EXTRA_VARS_FILE}" <<EOF
+{
+  "aws_region": "${AWS_REGION}",
+  "aws_account_id": "${AWS_ACCOUNT_ID}",
+  "build_commit": "${BUILD_COMMIT}",
+  "app_version": "${APP_VERSION}",
+  "postgres_password": "${STAGING_POSTGRES_PASSWORD}",
+  "secret_key": "${STAGING_SECRET_KEY}",
+  "allowed_hosts": "${STAGING_ALLOWED_HOSTS}",
+  "client_url": "${STAGING_CLIENT_URL}"
+}
+EOF
+
+                        mkdir -p reports
+                        REPORT_FILE="reports/ansible-deploy-staging.txt"
+
+                        ansible-playbook \
+                            --inventory ansible/inventory.ini \
+                            --limit staging \
+                            --user "${STAGING_SSH_USER}" \
+                            --private-key "${STAGING_SSH_KEY}" \
+                            --extra-vars "@${EXTRA_VARS_FILE}" \
+                            ansible/deploy-staging.yml \
+                            | tee "${REPORT_FILE}"
+                    '''
+                }
+            }
+
+            post {
+                always {
+                    archiveArtifacts(
+                        allowEmptyArchive: true,
+                        artifacts: 'reports/ansible-deploy-staging.txt',
+                        fingerprint: true
+                    )
+                }
+            }
+        }
+
     }
 
     post {
         success {
-            echo "CI passed, images were published, and staging connectivity was validated for ${env.SHORT_COMMIT}."
+            echo "CI passed, images were published, and staging was deployed for ${env.SHORT_COMMIT}."
         }
 
         failure {

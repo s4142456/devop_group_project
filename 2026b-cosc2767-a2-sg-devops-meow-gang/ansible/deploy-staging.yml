@@ -1,0 +1,87 @@
+# RMIT University Vietnam
+# Course: COSC2767|COSC2805 Systems Deployment and Operations
+# Semester: 2026B
+# Assessment: Assignment 2
+# Author: <your name>
+# ID: s<your id>
+# Created date: 08/09/2026
+# Last modified: 08/09/2026
+# Acknowledgement: Ansible documentation, Docker Compose documentation,
+# AWS ECR documentation, and team project documentation.
+
+---
+- name: Deploy RMIT Store to staging
+  hosts: staging
+  become: true
+  vars:
+    app_dir: /home/ec2-user/app
+    ecr_registry: "{{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com"
+    backend_image: "{{ ecr_registry }}/meowgang/rmit-store-backend:{{ build_commit }}"
+    frontend_image: "{{ ecr_registry }}/meowgang/rmit-store-frontend:{{ build_commit }}"
+
+  tasks:
+    - name: Ensure app directory exists
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: '0755'
+
+    - name: Copy staging compose file to host
+      ansible.builtin.copy:
+        src: ../compose.staging.yml
+        dest: "{{ app_dir }}/compose.staging.yml"
+        owner: ec2-user
+        group: ec2-user
+        mode: '0644'
+
+    - name: Render staging .env file
+      ansible.builtin.copy:
+        dest: "{{ app_dir }}/.env"
+        owner: ec2-user
+        group: ec2-user
+        mode: '0600'
+        content: |
+          POSTGRES_PASSWORD={{ postgres_password }}
+          SECRET_KEY={{ secret_key }}
+          ALLOWED_HOSTS={{ allowed_hosts }}
+          CLIENT_URL={{ client_url }}
+          BACKEND_IMAGE={{ backend_image }}
+          FRONTEND_IMAGE={{ frontend_image }}
+          APP_VERSION={{ app_version }}
+          GIT_COMMIT={{ build_commit }}
+      no_log: true
+
+    - name: Authenticate Docker to ECR
+      ansible.builtin.shell: >-
+        aws ecr get-login-password --region {{ aws_region }}
+        | docker login --username AWS --password-stdin {{ ecr_registry }}
+      changed_when: false
+      no_log: true
+
+    - name: Pull and start the staging stack
+      ansible.builtin.command:
+        chdir: "{{ app_dir }}"
+        cmd: docker compose -f compose.staging.yml up -d --pull always --remove-orphans
+      register: compose_up
+      changed_when: "'Started' in compose_up.stderr or 'Recreated' in compose_up.stderr or 'Created' in compose_up.stderr"
+
+    - name: Wait for backend health endpoint
+      ansible.builtin.uri:
+        url: http://127.0.0.1/healthz/
+        status_code: 200
+      register: health_check
+      retries: 30
+      delay: 5
+      until: health_check.status == 200
+
+    - name: Report deployed version
+      ansible.builtin.uri:
+        url: http://127.0.0.1/api/version/
+        return_content: true
+      register: version_check
+
+    - name: Show deployed version
+      ansible.builtin.debug:
+        msg: "Staging deployed version: {{ version_check.content }}"
