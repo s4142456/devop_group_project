@@ -104,3 +104,4 @@ volumes:
 
 networks:
   rmit-store-net:
+  
