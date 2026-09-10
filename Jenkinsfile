@@ -692,7 +692,7 @@ pipeline {
                     )
                 ]) {
                     sh '''
-                        set -eu
+                        set -euo pipefail
 
                         export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
 
