@@ -77,7 +77,7 @@ pipeline {
                     set -eu
 
                     test -f APPLICATION_README.md
-                    test -f docs/A2_MASTER_TODO.md
+                    test -f A2_MASTER_TODO.md
                     test -f server/requirements.txt
                     test -f server/requirements-dev.txt
                     test -f server/pytest.ini
