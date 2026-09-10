@@ -1,40 +1,62 @@
-# RMIT DevOps Group Project
+RMIT University Vietnam
+Course: COSC2767 Systems Deployment and Operations
+Semester: 2026B
+Assessment: Assignment 2
+Author: Ngo Hoang Long
+ID: s4142456
+Created date: 3/9/2026
+Last modified: dd/mm/yyyy
+Acknowledgement: Official assignment brief; Django, pytest, pytest-django and pytest-cov documentation; OpenAI Codex used for test-setup guidance
 
-This repository keeps the original RMIT Store application and the current DevOps group project together so a new teammate can compare the starting point with the system the team has developed.
+# RMIT Store CI/CD Pipeline
 
-## Directory guide
+## 1. Project and team information
+## 2. Architecture overview
+## 3. Prerequisites
+## 4. Repository structure
+## 5. Required environment configuration
+## 6. AWS provisioning order
+## 7. Ansible inventory and playbook order
+## 8. Jenkins installation and configuration
+## 9. Required Jenkins credentials
+## 10. Triggering a deployment
+## 11. Verifying staging and production
+## 12. Triggering a rollback
+## 13. Running tests locally
 
-### `COSC2767-RMIT-Store-Django-Vue/`
+### Backend testing
 
-This is the **initial web application** supplied as the project's starting point. It contains the original Django backend and Vue frontend before the team's Assignment 2 DevOps work.
+#### Test tooling
 
-Use this directory when you need to:
+The Django backend test suite uses:
 
-- understand the original application;
-- compare the starting code with the team's changes; or
-- review the original application documentation and expected behaviour.
+- pytest 9.1.1
+- pytest-django 4.14.0
+- pytest-cov 7.1.0
 
-### `2026b-cosc2767-a2-sg-devops-meow-gang/`
+Test dependencies are separated from runtime dependencies in
+`server/requirements-dev.txt`.
 
-This is the **current web application and DevOps project** that the team has been working on. It contains the team's testing, Docker, Jenkins, Ansible, AWS/S3, staging and deployment work, together with project documentation and evidence.
+#### Install backend test dependencies
 
-Use this directory for current development, testing, deployment, report evidence and the final Assignment 2 deliverables.
+From the repository root on Linux or an AWS/Jenkins host:
 
-## AWS Learner's Lab
-- https://awsacademy.instructure.com/login/canvas
-- email: projectcookit@gmail.com
-- password: @Meowgang26
-- private key to ssh to EC2 servers: meowgang-store-staging-key.pem
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r server/requirements-dev.txt
+```
+## 14. Failure recovery
+## 15. Cleanup
+## 16. Known limitations
 
-## Getting started
 
-1. Read this file to identify the correct directory.
-2. For the original application, open `COSC2767-RMIT-Store-Django-Vue/README.md`.
-3. For the current team project, open `2026b-cosc2767-a2-sg-devops-meow-gang/README.md` and `2026b-cosc2767-a2-sg-devops-meow-gang/APPLICATION_README.md`.
-4. Create local environment files from the supplied `.env.example` files. Actual `.env` files and credentials are not stored in this repository.
-5. Read A2_TODO_2_COMPLETE.md in 026b-cosc2767-a2-sg-devops-meow-gang/
-6. Install dependencies from the relevant Python requirements and npm lock files rather than committing `.venv` or `node_modules` directories.
 
-## Repository note
+---
+Private key.pem for all servers to ssh: check .pem file in the team's Google Drive
 
-The two directories are source snapshots within one repository. Their former nested `.git` directories and private credentials are intentionally not included.
+Server 1: meowgang-store-staging
+- Public IPv4 address: 32.193.86.95
+- Private IPv4 address: 172.31.34.225
+- Public DNS: ec2-32-193-86-95.compute-1.amazonaws.com
+
