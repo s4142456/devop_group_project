@@ -41,6 +41,10 @@ pipeline {
         FRONTEND_IMAGE_NAME = 'meowgang/rmit-store-frontend'
         STAGING_ALLOWED_HOSTS = '127.0.0.1,localhost,172.31.8.77,52.3.160.96'
         STAGING_CLIENT_URL = 'http://52.3.160.96'
+        // TODO: append the prod public IP to PROD_ALLOWED_HOSTS and switch
+        // PROD_CLIENT_URL to the prod public URL once the ELB/EIP is known.
+        PROD_ALLOWED_HOSTS = '127.0.0.1,localhost,172.31.31.88,13.220.98.202'
+        PROD_CLIENT_URL = 'http://13.220.98.202'
     }
 
     stages {
@@ -746,11 +750,149 @@ EOF
             }
         }
 
+        stage('Validate Production Connectivity') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'PROD_SSH_KEY',
+                        usernameVariable: 'PROD_SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+
+                        test -n "${PROD_SSH_KEY}"
+                        test -f "${PROD_SSH_KEY}"
+                        test -n "${PROD_SSH_USER}"
+
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+
+                        test -f "${ANSIBLE_CONFIG}"
+
+                        mkdir -p reports
+                        REPORT_FILE="reports/ansible-prod-connectivity.txt"
+
+                        echo "Ansible configuration: ${ANSIBLE_CONFIG}" \
+                            > "${REPORT_FILE}"
+
+                        echo "Testing Jenkins-to-production connectivity" \
+                            >> "${REPORT_FILE}"
+
+                        set +e
+
+                        ansible swarm_manager \
+                            --inventory ansible/inventory.ini \
+                            --module-name ping \
+                            --user "${PROD_SSH_USER}" \
+                            --private-key "${PROD_SSH_KEY}" \
+                            >> "${REPORT_FILE}" 2>&1
+
+                        ANSIBLE_STATUS="$?"
+
+                        set -e
+
+                        cat "${REPORT_FILE}"
+
+                        if [ "${ANSIBLE_STATUS}" -ne 0 ]; then
+                            echo "Production connectivity failed with exit code ${ANSIBLE_STATUS}."
+                            exit "${ANSIBLE_STATUS}"
+                        fi
+
+                        echo "Production connectivity validated successfully." |
+                            tee -a "${REPORT_FILE}"
+                    '''
+                }
+            }
+
+            post {
+                always {
+                    archiveArtifacts(
+                        allowEmptyArchive: true,
+                        artifacts: 'reports/ansible-prod-connectivity.txt',
+                        fingerprint: true
+                    )
+                }
+            }
+        }
+
+        stage('Deploy to Production') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'PROD_SSH_KEY',
+                        usernameVariable: 'PROD_SSH_USER'
+                    ),
+                    string(
+                        credentialsId: 'staging-postgres-password',
+                        variable: 'PROD_POSTGRES_PASSWORD'
+                    ),
+                    string(
+                        credentialsId: 'staging-django-secret-key',
+                        variable: 'PROD_SECRET_KEY'
+                    )
+                ]) {
+                    sh '''
+                        set -euo pipefail
+
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+
+                        AWS_ACCOUNT_ID="$(aws sts get-caller-identity \
+                            --query Account \
+                            --output text)"
+
+                        test -n "${AWS_ACCOUNT_ID}"
+                        test "${AWS_ACCOUNT_ID}" != "None"
+
+                        EXTRA_VARS_FILE="$(mktemp)"
+                        trap 'rm -f "${EXTRA_VARS_FILE}"' EXIT
+                        chmod 600 "${EXTRA_VARS_FILE}"
+
+                        cat > "${EXTRA_VARS_FILE}" <<EOF
+{
+  "aws_region": "${AWS_REGION}",
+  "aws_account_id": "${AWS_ACCOUNT_ID}",
+  "build_commit": "${BUILD_COMMIT}",
+  "app_version": "${APP_VERSION}",
+  "postgres_password": "${PROD_POSTGRES_PASSWORD}",
+  "secret_key": "${PROD_SECRET_KEY}",
+  "allowed_hosts": "${PROD_ALLOWED_HOSTS}",
+  "client_url": "${PROD_CLIENT_URL}"
+}
+EOF
+
+                        mkdir -p reports
+                        REPORT_FILE="reports/ansible-deploy-prod.txt"
+
+                        ansible-playbook \
+                            --inventory ansible/inventory.ini \
+                            --limit swarm_manager \
+                            --user "${PROD_SSH_USER}" \
+                            --private-key "${PROD_SSH_KEY}" \
+                            --extra-vars "@${EXTRA_VARS_FILE}" \
+                            ansible/deploy-prod.yml \
+                            | tee "${REPORT_FILE}"
+                    '''
+                }
+            }
+
+            post {
+                always {
+                    archiveArtifacts(
+                        allowEmptyArchive: true,
+                        artifacts: 'reports/ansible-deploy-prod.txt',
+                        fingerprint: true
+                    )
+                }
+            }
+        }
+
     }
 
     post {
         success {
-            echo "CI passed, images were published, and staging was deployed for ${env.SHORT_COMMIT}."
+            echo "CI passed, images were published, staging was deployed, and production was deployed for ${env.SHORT_COMMIT}."
         }
 
         failure {
