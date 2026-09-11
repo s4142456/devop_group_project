@@ -1,0 +1,22 @@
+# RMIT University Vietnam
+# Course: COSC2767|COSC2805 Systems Deployment and Operations
+# Semester: 2026B
+# Assessment: Assignment 2
+# Author: <your name>
+# ID: s<your id>
+# Created date: 10/09/2026
+# Last modified: 10/09/2026
+# Acknowledgement: Grafana provisioning documentation.
+
+apiVersion: 1
+
+providers:
+  - name: rmit-store
+    orgId: 1
+    folder: RMIT Store
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

@@ -871,7 +871,7 @@ EOF
                             --user "${PROD_SSH_USER}" \
                             --private-key "${PROD_SSH_KEY}" \
                             --extra-vars "@${EXTRA_VARS_FILE}" \
-                            ansible/deploy-prod.yml \
+                            ansible/deploy-prod-swarm.yml \
                             | tee "${REPORT_FILE}"
                     '''
                 }

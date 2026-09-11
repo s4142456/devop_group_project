@@ -1,0 +1,200 @@
+# RMIT University Vietnam
+# Course: COSC2767|COSC2805 Systems Deployment and Operations
+# Semester: 2026B
+# Assessment: Assignment 2
+# Acknowledgement: Ansible documentation, Docker Compose documentation,
+# Prometheus, Grafana, Loki, Promtail documentation.
+
+# Provision the monitoring stack on a target host. Two roles:
+#
+#   role=central       Central Prometheus + Grafana + Loki + Promtail +
+#                      node_exporter + blackbox_exporter. Runs on the staging
+#                      host or the prod swarm manager.
+#
+#   role=exporters     Only node_exporter + Promtail. Runs on prod swarm
+#                      workers. Ships metrics/logs to the central manager.
+#
+# env variable (staging|prod) selects the correct Prometheus scrape config
+# for the central role.
+#
+# Required variables:
+#   role, env, target_hosts (inventory group)
+#   For role=central AND env=prod:
+#     worker_1_private_ip, worker_2_private_ip
+#   For role=exporters:
+#     manager_private_ip
+
+---
+- name: Provision monitoring stack
+  hosts: "{{ target_hosts }}"
+  become: true
+  vars:
+    monitoring_dir: /home/ec2-user/monitoring
+
+  tasks:
+    # --- Swap file (safety on t3.small; harmless on larger boxes) ---
+    - name: Check whether /swapfile is already active
+      ansible.builtin.command: swapon --show=NAME --noheadings
+      register: active_swaps
+      changed_when: false
+
+    - name: Ensure swap file exists
+      ansible.builtin.command: fallocate -l 2G /swapfile
+      args:
+        creates: /swapfile
+
+    - name: Restrict permissions on swap file
+      ansible.builtin.file:
+        path: /swapfile
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Format swap file
+      ansible.builtin.command: mkswap /swapfile
+      when: "'/swapfile' not in active_swaps.stdout"
+      register: mkswap_result
+      changed_when: "'Setting up swapspace' in (mkswap_result.stdout | default(''))"
+
+    - name: Enable swap file
+      ansible.builtin.command: swapon /swapfile
+      when: "'/swapfile' not in active_swaps.stdout"
+      register: swapon_result
+      changed_when: swapon_result.rc == 0
+
+    - name: Persist swap file in /etc/fstab
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        line: '/swapfile none swap sw 0 0'
+        state: present
+
+    - name: Set vm.swappiness to 10
+      ansible.posix.sysctl:
+        name: vm.swappiness
+        value: '10'
+        state: present
+        sysctl_file: /etc/sysctl.d/99-swappiness.conf
+        reload: true
+
+    # --- Common directory + shared configs on every monitored host ---
+    - name: Ensure monitoring directory exists
+      ansible.builtin.file:
+        path: "{{ monitoring_dir }}"
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: '0755'
+
+    # ============================================================
+    # ROLE: central (staging host or prod-swarm manager)
+    # ============================================================
+    - name: Copy central compose file
+      ansible.builtin.copy:
+        src: ../monitoring/compose.monitoring.yml
+        dest: "{{ monitoring_dir }}/compose.monitoring.yml"
+        owner: ec2-user
+        group: ec2-user
+        mode: '0644'
+      when: role == 'central'
+
+    - name: Copy shared configs (loki, promtail, blackbox)
+      ansible.builtin.copy:
+        src: "../monitoring/shared/{{ item }}"
+        dest: "{{ monitoring_dir }}/{{ item }}"
+        owner: ec2-user
+        group: ec2-user
+        mode: '0644'
+      loop:
+        - loki-config.yml
+        - promtail-config.yml
+        - blackbox.yml
+      when: role == 'central'
+
+    - name: Copy Grafana provisioning + dashboards
+      ansible.builtin.copy:
+        src: ../monitoring/grafana/
+        dest: "{{ monitoring_dir }}/grafana/"
+        owner: ec2-user
+        group: ec2-user
+        directory_mode: '0755'
+        mode: '0644'
+      when: role == 'central'
+
+    - name: Copy staging prometheus.yml
+      ansible.builtin.copy:
+        src: ../monitoring/staging/prometheus.yml
+        dest: "{{ monitoring_dir }}/prometheus.yml"
+        owner: ec2-user
+        group: ec2-user
+        mode: '0644'
+      when:
+        - role == 'central'
+        - env == 'staging'
+
+    - name: Render prod prometheus.yml (embeds worker IPs)
+      ansible.builtin.template:
+        src: ../monitoring/prod/prometheus.yml.j2
+        dest: "{{ monitoring_dir }}/prometheus.yml"
+        owner: ec2-user
+        group: ec2-user
+        mode: '0644'
+      when:
+        - role == 'central'
+        - env == 'prod'
+
+    - name: Start the central monitoring stack
+      ansible.builtin.command:
+        chdir: "{{ monitoring_dir }}"
+        cmd: docker compose -f compose.monitoring.yml up -d --pull always --remove-orphans --force-recreate
+      register: compose_up_central
+      changed_when: "'Started' in compose_up_central.stderr or 'Recreated' in compose_up_central.stderr or 'Created' in compose_up_central.stderr"
+      when: role == 'central'
+
+    - name: Wait for Grafana to be reachable
+      ansible.builtin.uri:
+        url: http://127.0.0.1:3000/api/health
+        status_code: 200
+      register: grafana_health
+      retries: 30
+      delay: 5
+      until: grafana_health.status == 200
+      when: role == 'central'
+
+    # ============================================================
+    # ROLE: exporters (prod swarm workers)
+    # ============================================================
+    - name: Copy exporters compose file
+      ansible.builtin.copy:
+        src: ../monitoring/exporters/compose.exporters.yml
+        dest: "{{ monitoring_dir }}/compose.exporters.yml"
+        owner: ec2-user
+        group: ec2-user
+        mode: '0644'
+      when: role == 'exporters'
+
+    - name: Render worker promtail config (points at manager Loki)
+      ansible.builtin.template:
+        src: ../monitoring/exporters/promtail-config.yml.j2
+        dest: "{{ monitoring_dir }}/promtail-config.yml"
+        owner: ec2-user
+        group: ec2-user
+        mode: '0644'
+      when: role == 'exporters'
+
+    - name: Start the exporters stack
+      ansible.builtin.command:
+        chdir: "{{ monitoring_dir }}"
+        cmd: docker compose -f compose.exporters.yml up -d --pull always --remove-orphans --force-recreate
+      register: compose_up_exporters
+      changed_when: "'Started' in compose_up_exporters.stderr or 'Recreated' in compose_up_exporters.stderr or 'Created' in compose_up_exporters.stderr"
+      when: role == 'exporters'
+
+    - name: Report central stack URL
+      ansible.builtin.debug:
+        msg: "Central monitoring stack running. Grafana: http://{{ ansible_host }}:3000 (admin / RmitMonitor2767!)"
+      when: role == 'central'
+
+    - name: Report exporters running
+      ansible.builtin.debug:
+        msg: "Exporters running on {{ ansible_host }}: node_exporter:9100, promtail shipping to http://{{ manager_private_ip }}:3100"
+      when: role == 'exporters'

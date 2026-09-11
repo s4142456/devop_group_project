@@ -1,0 +1,51 @@
+# RMIT University Vietnam
+# Course: COSC2767|COSC2805 Systems Deployment and Operations
+# Semester: 2026B
+# Assessment: Assignment 2
+# Acknowledgement: Prometheus documentation, blackbox_exporter documentation.
+#
+# Prometheus scrape config for the PRODUCTION environment.
+# Rendered by ansible/monitoring.yml from a Jinja2 template. The manager runs
+# Prometheus + Grafana + Loki; each worker runs its own node_exporter and
+# promtail. Prometheus scrapes each worker's node_exporter over the swarm
+# private network.
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels:
+    env: prod
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: node_exporter
+    static_configs:
+      - targets: ['node-exporter:9100']
+        labels:
+          host: prod-manager
+      - targets: ['{{ worker_1_private_ip }}:9100']
+        labels:
+          host: prod-worker-1
+      - targets: ['{{ worker_2_private_ip }}:9100']
+        labels:
+          host: prod-worker-2
+
+  - job_name: blackbox_http
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - http://host.docker.internal/healthz/
+          - http://host.docker.internal/readyz/
+          - http://host.docker.internal/api/version/
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115

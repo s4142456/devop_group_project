@@ -1,0 +1,22 @@
+# RMIT University Vietnam
+# Course: COSC2767|COSC2805 Systems Deployment and Operations
+# Semester: 2026B
+# Assessment: Assignment 2
+# Author: <your name>
+# ID: s<your id>
+# Created date: 10/09/2026
+# Last modified: 10/09/2026
+# Acknowledgement: blackbox_exporter documentation.
+
+modules:
+  http_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      valid_status_codes: [200]
+      preferred_ip_protocol: ip4
+      follow_redirects: true
+      # Override the Host header so Django accepts the request
+      # (host.docker.internal is not in ALLOWED_HOSTS; 127.0.0.1 is).
+      headers:
+        Host: "127.0.0.1"

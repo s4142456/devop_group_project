@@ -1,0 +1,47 @@
+# RMIT University Vietnam
+# Course: COSC2767|COSC2805 Systems Deployment and Operations
+# Semester: 2026B
+# Assessment: Assignment 2
+# Acknowledgement: Docker Swarm documentation, Ansible documentation.
+
+# One-time playbook to enable Docker Swarm mode on the target host as the
+# manager. Idempotent: if Swarm is already active on this node it skips init.
+#
+# Required variables:
+#   target_hosts   inventory group (typically swarm_manager)
+#   advertise_addr private IP the manager advertises for cluster mgmt
+
+---
+- name: Initialise Docker Swarm on the manager
+  hosts: "{{ target_hosts }}"
+  become: true
+
+  tasks:
+    - name: Read Docker daemon swarm state
+      ansible.builtin.command: docker info --format '{{ "{{" }}.Swarm.LocalNodeState{{ "}}" }}'
+      register: swarm_state
+      changed_when: false
+
+    - name: Initialise Docker Swarm
+      ansible.builtin.command:
+        cmd: docker swarm init --advertise-addr {{ advertise_addr }}
+      when: swarm_state.stdout != 'active'
+      register: swarm_init
+
+    - name: Capture the worker join token
+      ansible.builtin.command: docker swarm join-token worker -q
+      register: worker_token
+      changed_when: false
+
+    - name: Show current node listing
+      ansible.builtin.command: docker node ls
+      register: node_ls
+      changed_when: false
+
+    - name: Report Swarm status
+      ansible.builtin.debug:
+        msg:
+          - "Swarm state: {{ swarm_state.stdout }} -> active"
+          - "Worker join token (share with worker provision): {{ worker_token.stdout }}"
+          - "Nodes:"
+          - "{{ node_ls.stdout_lines }}"
