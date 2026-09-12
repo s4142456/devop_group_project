@@ -735,12 +735,19 @@ EOF
                         # If STAGING_HOST_IP is set, target that IP directly
                         # (ad-hoc single-host inventory). Otherwise fall back
                         # to ansible/inventory.ini's [staging] group.
+                        #
+                        # deploy-staging.yml's `hosts:` is a var that defaults
+                        # to 'staging'. When we override the inventory we pass
+                        # target_hosts=all so the play still matches the one
+                        # inline host.
                         if [ -n "${STAGING_HOST_IP}" ]; then
                             echo "STAGING_HOST_IP=${STAGING_HOST_IP} -> overriding inventory."
                             INVENTORY_ARGS="--inventory ${STAGING_HOST_IP},"
+                            HOSTS_OVERRIDE="-e target_hosts=all"
                         else
                             echo "STAGING_HOST_IP empty -> using ansible/inventory.ini [staging]."
                             INVENTORY_ARGS="--inventory ansible/inventory.ini --limit staging"
+                            HOSTS_OVERRIDE=""
                         fi
 
                         ansible-playbook \
@@ -748,6 +755,7 @@ EOF
                             --user "${STAGING_SSH_USER}" \
                             --private-key "${STAGING_SSH_KEY}" \
                             --extra-vars "@${EXTRA_VARS_FILE}" \
+                            ${HOSTS_OVERRIDE} \
                             ansible/deploy-staging.yml \
                             | tee "${REPORT_FILE}"
                     '''

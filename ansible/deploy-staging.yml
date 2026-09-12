@@ -11,7 +11,11 @@
 
 ---
 - name: Deploy RMIT Store to staging
-  hosts: staging
+  # Default targets the [staging] group in ansible/inventory.ini. When the
+  # deploy pipeline runs against an ad-hoc single-host inventory (e.g. a
+  # freshly provisioned EC2), it passes -e target_hosts=all so this pattern
+  # still matches.
+  hosts: "{{ target_hosts | default('staging') }}"
   become: true
   vars:
     app_dir: /home/ec2-user/app
