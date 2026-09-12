@@ -1,0 +1,174 @@
+/*
+RMIT University Vietnam
+Course: COSC2767/COSC2805 Systems Deployment and Operations
+Semester: 2026B
+Assessment: Assignment 2
+Acknowledgement: Jenkins documentation, Ansible documentation.
+
+Staging provisioning pipeline. Given a fresh EC2 (public + private IP),
+installs Docker, Docker Compose v2 plugin, adds a swap file, and deploys
+the central monitoring stack (Prometheus + Grafana + Loki + Promtail +
+node_exporter + blackbox_exporter). Staging is a single-node Compose host
+that also carries the monitoring stack.
+
+Runs only against a target you specify — nothing in inventory.ini is
+modified. After success, the pipeline prints the inventory line you can
+paste into ansible/inventories/staging.ini if you want subsequent
+deployments to target this host by default.
+*/
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+        timeout(time: 20, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(
+            name: 'STAGING_PUBLIC_IP',
+            defaultValue: '',
+            description: 'Public IP of the target staging EC2 (Ansible SSHes here).'
+        )
+        string(
+            name: 'STAGING_PRIVATE_IP',
+            defaultValue: '',
+            description: 'Private IP of the target staging EC2 (used for host labels and inventory line).'
+        )
+    }
+
+    environment {
+        ANSIBLE_NOCOLOR = '1'
+        ANSIBLE_HOST_KEY_CHECKING = 'False'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                deleteDir()
+                checkout scm
+            }
+        }
+
+        stage('Validate Inputs') {
+            steps {
+                script {
+                    if (!params.STAGING_PUBLIC_IP?.trim()) {
+                        error "STAGING_PUBLIC_IP is required."
+                    }
+                    if (!params.STAGING_PRIVATE_IP?.trim()) {
+                        error "STAGING_PRIVATE_IP is required."
+                    }
+                    echo "Provisioning staging target: public=${params.STAGING_PUBLIC_IP} private=${params.STAGING_PRIVATE_IP}"
+                }
+            }
+        }
+
+        stage('Verify SSH to Target') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+                        ansible all \
+                            --inventory "${STAGING_PUBLIC_IP}," \
+                            --module-name ping \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}"
+                    '''
+                }
+            }
+        }
+
+        stage('Setup Host (Docker + Compose)') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+                        ansible-playbook \
+                            --inventory "${STAGING_PUBLIC_IP}," \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}" \
+                            ansible/setup-hosts.yml
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Monitoring Stack') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+                        ansible-playbook \
+                            --inventory "${STAGING_PUBLIC_IP}," \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}" \
+                            -e "target_hosts=all" \
+                            -e "role=central" \
+                            -e "env=staging" \
+                            ansible/monitoring.yml
+                    '''
+                }
+            }
+        }
+
+        stage('Report') {
+            steps {
+                script {
+                    def summary = """
+Provisioned STAGING host ${params.STAGING_PUBLIC_IP} (private ${params.STAGING_PRIVATE_IP})
+  - Docker + Compose v2 installed
+  - Central monitoring stack running
+  - Grafana:    http://${params.STAGING_PUBLIC_IP}:3000  (admin / RmitMonitor2767!)
+  - Prometheus: http://${params.STAGING_PUBLIC_IP}:9090
+
+To make this the default staging host, add to ansible/inventories/staging.ini
+under [staging]:
+
+  meowgang-store-staging ansible_host=${params.STAGING_PRIVATE_IP}
+
+Or trigger the main deploy pipeline with STAGING_HOST_IP=${params.STAGING_PUBLIC_IP}
+to deploy the application to this host without editing inventory.
+"""
+                    echo summary
+                    writeFile file: 'reports/provision-staging-summary.txt', text: summary
+                    archiveArtifacts artifacts: 'reports/provision-staging-summary.txt', fingerprint: true
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Staging provisioning complete for ${params.STAGING_PUBLIC_IP}."
+        }
+        failure {
+            echo "Staging provisioning FAILED. Inspect the failed stage log. Re-run is safe (playbooks are idempotent)."
+        }
+    }
+}
