@@ -28,6 +28,21 @@ pipeline {
             defaultValue: false,
             description: 'Enable only to prove that Jenkins blocks a failing release.'
         )
+        booleanParam(
+            name: 'DEMO_STAGING_HEALTH_FAILURE',
+            defaultValue: false,
+            description: 'Enable to simulate a deploy that passes CI but fails the staging health check (Django rejects the probe because ALLOWED_HOSTS is broken). Prod deploy stages are then skipped.'
+        )
+        string(
+            name: 'STAGING_HOST_IP',
+            defaultValue: '',
+            description: 'Optional: override staging target host IP (public IP). Empty = fall back to ansible/inventory.ini. Set to deploy to a freshly provisioned host without editing inventory.'
+        )
+        string(
+            name: 'PROD_MANAGER_IP',
+            defaultValue: '',
+            description: 'Optional: override prod swarm manager target IP (public IP). Empty = fall back to ansible/inventory.ini [swarm_manager]. Set to deploy to a freshly provisioned fleet without editing inventory.'
+        )
     }
 
     triggers {
@@ -44,7 +59,7 @@ pipeline {
         // TODO: append the prod public IP to PROD_ALLOWED_HOSTS and switch
         // PROD_CLIENT_URL to the prod public URL once the ELB/EIP is known.
         PROD_ALLOWED_HOSTS = '127.0.0.1,localhost,172.31.31.88,13.220.98.202'
-        PROD_CLIENT_URL = 'http://13.220.98.202'
+        PROD_CLIENT_URL = 'http://3.236.101.7'
     }
 
     stages {
@@ -605,7 +620,7 @@ pipeline {
             }
         }
 
-                stage('Validate Staging Connectivity') {
+        stage('Validate Staging Connectivity') {
             steps {
                 withCredentials([
                     sshUserPrivateKey(
@@ -616,42 +631,29 @@ pipeline {
                 ]) {
                     sh '''
                         set -eu
-
-                        test -n "${STAGING_SSH_KEY}"
-                        test -f "${STAGING_SSH_KEY}"
-                        test -n "${STAGING_SSH_USER}"
-
                         export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
-
-                        test -f "${ANSIBLE_CONFIG}"
 
                         mkdir -p reports
                         REPORT_FILE="reports/ansible-staging-connectivity.txt"
 
-                        echo "Ansible configuration: ${ANSIBLE_CONFIG}" \
-                            > "${REPORT_FILE}"
-
-                        echo "Validating Ansible inventory" \
-                            >> "${REPORT_FILE}"
-
-                        ansible-inventory \
-                            --inventory ansible/inventory.ini \
-                            --list >/dev/null
-
-                        echo "Testing Jenkins-to-staging connectivity" \
-                            >> "${REPORT_FILE}"
+                        # Honour STAGING_HOST_IP override so we ping the same
+                        # target the deploy stage will hit. :- default prevents
+                        # "unbound variable" under set -u when the param is empty.
+                        if [ -n "${STAGING_HOST_IP:-}" ]; then
+                            echo "STAGING_HOST_IP=${STAGING_HOST_IP} -> pinging that IP." | tee "${REPORT_FILE}"
+                            PING_ARGS="all --inventory ${STAGING_HOST_IP},"
+                        else
+                            echo "STAGING_HOST_IP empty -> pinging [staging] from ansible/inventory.ini." | tee "${REPORT_FILE}"
+                            PING_ARGS="staging --inventory ansible/inventory.ini"
+                        fi
 
                         set +e
-
-                        ansible staging \
-                            --inventory ansible/inventory.ini \
+                        ansible ${PING_ARGS} \
                             --module-name ping \
                             --user "${STAGING_SSH_USER}" \
                             --private-key "${STAGING_SSH_KEY}" \
                             >> "${REPORT_FILE}" 2>&1
-
                         ANSIBLE_STATUS="$?"
-
                         set -e
 
                         cat "${REPORT_FILE}"
@@ -661,8 +663,7 @@ pipeline {
                             exit "${ANSIBLE_STATUS}"
                         fi
 
-                        echo "Staging connectivity validated successfully." |
-                            tee -a "${REPORT_FILE}"
+                        echo "Staging connectivity validated successfully." | tee -a "${REPORT_FILE}"
                     '''
                 }
             }
@@ -706,6 +707,17 @@ pipeline {
 
                         test -n "${AWS_ACCOUNT_ID}"
                         test "${AWS_ACCOUNT_ID}" != "None"
+                        # Demo hook: when DEMO_STAGING_HEALTH_FAILURE is true,
+                        # override ALLOWED_HOSTS with a value Django will reject
+                        # so the container health probe fails. Proves that a bad
+                        # staging deploy prevents production stages from running.
+                        if [ "${DEMO_STAGING_HEALTH_FAILURE}" = "true" ]; then
+                            echo "DEMO_STAGING_HEALTH_FAILURE=true: forcing bad ALLOWED_HOSTS."
+                            EFFECTIVE_ALLOWED_HOSTS="badhost.example.com"
+                        else
+                            EFFECTIVE_ALLOWED_HOSTS="${STAGING_ALLOWED_HOSTS}"
+                        fi
+
 
                         EXTRA_VARS_FILE="$(mktemp)"
                         trap 'rm -f "${EXTRA_VARS_FILE}"' EXIT
@@ -727,12 +739,30 @@ EOF
                         mkdir -p reports
                         REPORT_FILE="reports/ansible-deploy-staging.txt"
 
+                        # If STAGING_HOST_IP is set, target that IP directly
+                        # (ad-hoc single-host inventory). Otherwise fall back
+                        # to ansible/inventory.ini's [staging] group.
+                        #
+                        # deploy-staging.yml's `hosts:` is a var that defaults
+                        # to 'staging'. When we override the inventory we pass
+                        # target_hosts=all so the play still matches the one
+                        # inline host.
+                        if [ -n "${STAGING_HOST_IP:-}" ]; then
+                            echo "STAGING_HOST_IP=${STAGING_HOST_IP} -> overriding inventory."
+                            INVENTORY_ARGS="--inventory ${STAGING_HOST_IP},"
+                            HOSTS_OVERRIDE="-e target_hosts=all"
+                        else
+                            echo "STAGING_HOST_IP empty -> using ansible/inventory.ini [staging]."
+                            INVENTORY_ARGS="--inventory ansible/inventory.ini --limit staging"
+                            HOSTS_OVERRIDE=""
+                        fi
+
                         ansible-playbook \
-                            --inventory ansible/inventory.ini \
-                            --limit staging \
+                            ${INVENTORY_ARGS} \
                             --user "${STAGING_SSH_USER}" \
                             --private-key "${STAGING_SSH_KEY}" \
                             --extra-vars "@${EXTRA_VARS_FILE}" \
+                            ${HOSTS_OVERRIDE} \
                             ansible/deploy-staging.yml \
                             | tee "${REPORT_FILE}"
                     '''
@@ -761,35 +791,29 @@ EOF
                 ]) {
                     sh '''
                         set -eu
-
-                        test -n "${PROD_SSH_KEY}"
-                        test -f "${PROD_SSH_KEY}"
-                        test -n "${PROD_SSH_USER}"
-
                         export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
-
-                        test -f "${ANSIBLE_CONFIG}"
 
                         mkdir -p reports
                         REPORT_FILE="reports/ansible-prod-connectivity.txt"
 
-                        echo "Ansible configuration: ${ANSIBLE_CONFIG}" \
-                            > "${REPORT_FILE}"
-
-                        echo "Testing Jenkins-to-production connectivity" \
-                            >> "${REPORT_FILE}"
+                        # Honour PROD_MANAGER_IP override so we ping the same
+                        # target the deploy stage will hit. :- default prevents
+                        # "unbound variable" under set -u when the param is empty.
+                        if [ -n "${PROD_MANAGER_IP:-}" ]; then
+                            echo "PROD_MANAGER_IP=${PROD_MANAGER_IP} -> pinging that IP." | tee "${REPORT_FILE}"
+                            PING_ARGS="all --inventory ${PROD_MANAGER_IP},"
+                        else
+                            echo "PROD_MANAGER_IP empty -> pinging [swarm_manager] from ansible/inventory.ini." | tee "${REPORT_FILE}"
+                            PING_ARGS="swarm_manager --inventory ansible/inventory.ini"
+                        fi
 
                         set +e
-
-                        ansible swarm_manager \
-                            --inventory ansible/inventory.ini \
+                        ansible ${PING_ARGS} \
                             --module-name ping \
                             --user "${PROD_SSH_USER}" \
                             --private-key "${PROD_SSH_KEY}" \
                             >> "${REPORT_FILE}" 2>&1
-
                         ANSIBLE_STATUS="$?"
-
                         set -e
 
                         cat "${REPORT_FILE}"
@@ -799,8 +823,7 @@ EOF
                             exit "${ANSIBLE_STATUS}"
                         fi
 
-                        echo "Production connectivity validated successfully." |
-                            tee -a "${REPORT_FILE}"
+                        echo "Production connectivity validated successfully." | tee -a "${REPORT_FILE}"
                     '''
                 }
             }
@@ -865,12 +888,28 @@ EOF
                         mkdir -p reports
                         REPORT_FILE="reports/ansible-deploy-prod.txt"
 
+                        # If PROD_MANAGER_IP is set, target that IP directly
+                        # (ad-hoc single-host inventory). Otherwise fall back
+                        # to ansible/inventory.ini's [swarm_manager] group.
+                        # Same pattern as staging: pass target_hosts=all when
+                        # overriding so deploy-prod-swarm.yml's hosts pattern
+                        # (which defaults to 'swarm_manager') still matches.
+                        if [ -n "${PROD_MANAGER_IP:-}" ]; then
+                            echo "PROD_MANAGER_IP=${PROD_MANAGER_IP} -> overriding inventory."
+                            INVENTORY_ARGS="--inventory ${PROD_MANAGER_IP},"
+                            HOSTS_OVERRIDE="-e target_hosts=all"
+                        else
+                            echo "PROD_MANAGER_IP empty -> using ansible/inventory.ini [swarm_manager]."
+                            INVENTORY_ARGS="--inventory ansible/inventory.ini --limit swarm_manager"
+                            HOSTS_OVERRIDE=""
+                        fi
+
                         ansible-playbook \
-                            --inventory ansible/inventory.ini \
-                            --limit swarm_manager \
+                            ${INVENTORY_ARGS} \
                             --user "${PROD_SSH_USER}" \
                             --private-key "${PROD_SSH_KEY}" \
                             --extra-vars "@${EXTRA_VARS_FILE}" \
+                            ${HOSTS_OVERRIDE} \
                             ansible/deploy-prod-swarm.yml \
                             | tee "${REPORT_FILE}"
                     '''
@@ -898,6 +937,51 @@ EOF
         failure {
             echo 'Pipeline failed. Deployment stages must not run.'
             echo 'Inspect the failed stage, test result and console output.'
+            script {
+                // TODO before submission: swap credentialsId to
+                // 'jenkins-failure-email-recipients' (team distribution list).
+                withCredentials([string(credentialsId: 'personal-email-recipients', variable: 'FAILURE_RECIPIENTS')]) {
+                    emailext(
+                        subject: "[FAILED] ${env.JOB_NAME} #${env.BUILD_NUMBER} (${env.SHORT_COMMIT ?: 'unknown'})",
+                        body: """\
+<p>The RMIT Store pipeline failed.</p>
+<ul>
+  <li><b>Job:</b> ${env.JOB_NAME}</li>
+  <li><b>Build:</b> #${env.BUILD_NUMBER}</li>
+  <li><b>Commit:</b> ${env.BUILD_COMMIT ?: 'unknown'}</li>
+  <li><b>Result:</b> ${currentBuild.currentResult}</li>
+  <li><b>Console:</b> <a href="${env.BUILD_URL}console">open</a></li>
+  <li><b>Blue Ocean:</b> <a href="${env.RUN_DISPLAY_URL}">open</a></li>
+</ul>
+<p>Full console log is attached (compressed).</p>
+""",
+                        mimeType: 'text/html',
+                        to: "${FAILURE_RECIPIENTS}",
+                        attachLog: true,
+                        compressLog: true
+                    )
+                }
+            }
+        }
+
+        fixed {
+            script {
+                withCredentials([string(credentialsId: 'personal-email-recipients', variable: 'FAILURE_RECIPIENTS')]) {
+                    emailext(
+                        subject: "[FIXED] ${env.JOB_NAME} #${env.BUILD_NUMBER} (${env.SHORT_COMMIT ?: 'unknown'})",
+                        body: """\
+<p>The pipeline is green again after a previous failure.</p>
+<ul>
+  <li><b>Build:</b> #${env.BUILD_NUMBER}</li>
+  <li><b>Commit:</b> ${env.BUILD_COMMIT ?: 'unknown'}</li>
+  <li><b>Console:</b> <a href="${env.BUILD_URL}console">open</a></li>
+</ul>
+""",
+                        mimeType: 'text/html',
+                        to: "${FAILURE_RECIPIENTS}"
+                    )
+                }
+            }
         }
 
         always {
