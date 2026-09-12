@@ -33,6 +33,11 @@ pipeline {
             defaultValue: '',
             description: 'Optional: override staging target host IP (public IP). Empty = fall back to ansible/inventory.ini. Set to deploy to a freshly provisioned host without editing inventory.'
         )
+        string(
+            name: 'PROD_MANAGER_IP',
+            defaultValue: '',
+            description: 'Optional: override prod swarm manager target IP (public IP). Empty = fall back to ansible/inventory.ini [swarm_manager]. Set to deploy to a freshly provisioned fleet without editing inventory.'
+        )
     }
 
     triggers {
@@ -888,12 +893,28 @@ EOF
                         mkdir -p reports
                         REPORT_FILE="reports/ansible-deploy-prod.txt"
 
+                        # If PROD_MANAGER_IP is set, target that IP directly
+                        # (ad-hoc single-host inventory). Otherwise fall back
+                        # to ansible/inventory.ini's [swarm_manager] group.
+                        # Same pattern as staging: pass target_hosts=all when
+                        # overriding so deploy-prod-swarm.yml's hosts pattern
+                        # (which defaults to 'swarm_manager') still matches.
+                        if [ -n "${PROD_MANAGER_IP}" ]; then
+                            echo "PROD_MANAGER_IP=${PROD_MANAGER_IP} -> overriding inventory."
+                            INVENTORY_ARGS="--inventory ${PROD_MANAGER_IP},"
+                            HOSTS_OVERRIDE="-e target_hosts=all"
+                        else
+                            echo "PROD_MANAGER_IP empty -> using ansible/inventory.ini [swarm_manager]."
+                            INVENTORY_ARGS="--inventory ansible/inventory.ini --limit swarm_manager"
+                            HOSTS_OVERRIDE=""
+                        fi
+
                         ansible-playbook \
-                            --inventory ansible/inventory.ini \
-                            --limit swarm_manager \
+                            ${INVENTORY_ARGS} \
                             --user "${PROD_SSH_USER}" \
                             --private-key "${PROD_SSH_KEY}" \
                             --extra-vars "@${EXTRA_VARS_FILE}" \
+                            ${HOSTS_OVERRIDE} \
                             ansible/deploy-prod-swarm.yml \
                             | tee "${REPORT_FILE}"
                     '''

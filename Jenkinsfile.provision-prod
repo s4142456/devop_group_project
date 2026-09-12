@@ -1,0 +1,387 @@
+/*
+RMIT University Vietnam
+Course: COSC2767/COSC2805 Systems Deployment and Operations
+Semester: 2026B
+Assessment: Assignment 2
+Acknowledgement: Jenkins documentation, Ansible documentation, Docker Swarm
+documentation.
+
+Production provisioning pipeline. Given 3 fresh EC2s (1 manager + 2 workers),
+sets up the whole prod fleet in one run:
+
+  1. Docker + Compose v2 on all 3 hosts
+  2. Docker Swarm initialised on the manager (advertise-addr = private IP)
+  3. Central monitoring stack (Prometheus + Grafana + Loki + Promtail +
+     node_exporter + blackbox_exporter) on the manager
+  4. Each worker joins the swarm using a token fetched from the manager
+  5. Exporter-only stack (node_exporter + promtail shipping to manager's
+     Loki) on each worker
+
+Fails fast if any step errors. Playbooks are idempotent so re-running the
+pipeline after fixing an issue is safe.
+
+Runs only against the IPs you specify. Nothing in ansible/inventory.ini is
+modified. After success, the pipeline prints the inventory lines you can
+paste into ansible/inventories/prod.ini if you want future deployments to
+target this fleet by default.
+*/
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+        timeout(time: 30, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(
+            name: 'MANAGER_PUBLIC_IP',
+            defaultValue: '',
+            description: 'Public IP of the swarm manager EC2 (Ansible SSHes here).'
+        )
+        string(
+            name: 'MANAGER_PRIVATE_IP',
+            defaultValue: '',
+            description: 'Private IP of the swarm manager (used for swarm advertise-addr and as Loki push target).'
+        )
+        string(
+            name: 'WORKER_1_PUBLIC_IP',
+            defaultValue: '',
+            description: 'Public IP of worker 1 EC2.'
+        )
+        string(
+            name: 'WORKER_1_PRIVATE_IP',
+            defaultValue: '',
+            description: 'Private IP of worker 1 (baked into prod prometheus.yml scrape targets).'
+        )
+        string(
+            name: 'WORKER_2_PUBLIC_IP',
+            defaultValue: '',
+            description: 'Public IP of worker 2 EC2.'
+        )
+        string(
+            name: 'WORKER_2_PRIVATE_IP',
+            defaultValue: '',
+            description: 'Private IP of worker 2 (baked into prod prometheus.yml scrape targets).'
+        )
+    }
+
+    environment {
+        ANSIBLE_NOCOLOR = '1'
+        ANSIBLE_HOST_KEY_CHECKING = 'False'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                deleteDir()
+                checkout scm
+            }
+        }
+
+        stage('Validate Inputs') {
+            steps {
+                script {
+                    def required = [
+                        'MANAGER_PUBLIC_IP', 'MANAGER_PRIVATE_IP',
+                        'WORKER_1_PUBLIC_IP', 'WORKER_1_PRIVATE_IP',
+                        'WORKER_2_PUBLIC_IP', 'WORKER_2_PRIVATE_IP'
+                    ]
+                    def missing = required.findAll { !params.get(it)?.trim() }
+                    if (missing) {
+                        error "Missing required parameter(s): ${missing.join(', ')}"
+                    }
+                    echo "Provisioning prod fleet:"
+                    echo "  manager  public=${params.MANAGER_PUBLIC_IP}  private=${params.MANAGER_PRIVATE_IP}"
+                    echo "  worker-1 public=${params.WORKER_1_PUBLIC_IP}  private=${params.WORKER_1_PRIVATE_IP}"
+                    echo "  worker-2 public=${params.WORKER_2_PUBLIC_IP}  private=${params.WORKER_2_PRIVATE_IP}"
+                }
+            }
+        }
+
+        stage('Verify SSH to All 3 Hosts') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+                        # Comma-separated inline inventory of all 3 hosts.
+                        ansible all \
+                            --inventory "${MANAGER_PUBLIC_IP},${WORKER_1_PUBLIC_IP},${WORKER_2_PUBLIC_IP}," \
+                            --module-name ping \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}"
+                    '''
+                }
+            }
+        }
+
+        stage('Setup Hosts (Docker + Compose on all 3)') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+                        ansible-playbook \
+                            --inventory "${MANAGER_PUBLIC_IP},${WORKER_1_PUBLIC_IP},${WORKER_2_PUBLIC_IP}," \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}" \
+                            ansible/setup-hosts.yml
+                    '''
+                }
+            }
+        }
+
+        stage('Init Swarm on Manager') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+                        ansible-playbook \
+                            --inventory "${MANAGER_PUBLIC_IP}," \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}" \
+                            -e "target_hosts=all" \
+                            -e "advertise_addr=${MANAGER_PRIVATE_IP}" \
+                            ansible/init-swarm.yml
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Central Monitoring on Manager') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+                        ansible-playbook \
+                            --inventory "${MANAGER_PUBLIC_IP}," \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}" \
+                            -e "target_hosts=all" \
+                            -e "role=central" \
+                            -e "env=prod" \
+                            -e "worker_1_private_ip=${WORKER_1_PRIVATE_IP}" \
+                            -e "worker_2_private_ip=${WORKER_2_PRIVATE_IP}" \
+                            ansible/monitoring.yml
+                    '''
+                }
+            }
+        }
+
+        stage('Fetch Swarm Join Token from Manager') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    script {
+                        env.WORKER_JOIN_TOKEN = sh(
+                            returnStdout: true,
+                            script: '''
+                                ssh -o StrictHostKeyChecking=no \
+                                    -i "${SSH_KEY}" \
+                                    "${SSH_USER}@${MANAGER_PUBLIC_IP}" \
+                                    'sudo docker swarm join-token worker -q'
+                            '''
+                        ).trim()
+                        if (!env.WORKER_JOIN_TOKEN) {
+                            error "Empty join token - is the manager initialised?"
+                        }
+                        echo "Fetched worker join token (${env.WORKER_JOIN_TOKEN.length()} chars)."
+                    }
+                }
+            }
+        }
+
+        stage('Join + Deploy Exporters — Worker 1') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+
+                        echo ">>> worker 1 joining swarm"
+                        ansible-playbook \
+                            --inventory "${WORKER_1_PUBLIC_IP}," \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}" \
+                            -e "target_hosts=all" \
+                            -e "manager_private_ip=${MANAGER_PRIVATE_IP}" \
+                            -e "join_token=${WORKER_JOIN_TOKEN}" \
+                            ansible/join-swarm.yml
+
+                        echo ">>> worker 1 exporters"
+                        ansible-playbook \
+                            --inventory "${WORKER_1_PUBLIC_IP}," \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}" \
+                            -e "target_hosts=all" \
+                            -e "role=exporters" \
+                            -e "env=prod" \
+                            -e "manager_private_ip=${MANAGER_PRIVATE_IP}" \
+                            ansible/monitoring.yml
+                    '''
+                }
+            }
+        }
+
+        stage('Join + Deploy Exporters — Worker 2') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+
+                        echo ">>> worker 2 joining swarm"
+                        ansible-playbook \
+                            --inventory "${WORKER_2_PUBLIC_IP}," \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}" \
+                            -e "target_hosts=all" \
+                            -e "manager_private_ip=${MANAGER_PRIVATE_IP}" \
+                            -e "join_token=${WORKER_JOIN_TOKEN}" \
+                            ansible/join-swarm.yml
+
+                        echo ">>> worker 2 exporters"
+                        ansible-playbook \
+                            --inventory "${WORKER_2_PUBLIC_IP}," \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}" \
+                            -e "target_hosts=all" \
+                            -e "role=exporters" \
+                            -e "env=prod" \
+                            -e "manager_private_ip=${MANAGER_PRIVATE_IP}" \
+                            ansible/monitoring.yml
+                    '''
+                }
+            }
+        }
+
+        stage('Verify Fleet') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        NODES=$(ssh -o StrictHostKeyChecking=no \
+                                    -i "${SSH_KEY}" \
+                                    "${SSH_USER}@${MANAGER_PUBLIC_IP}" \
+                                    'sudo docker node ls')
+                        echo "$NODES"
+                        # Expect 3 lines beyond the header.
+                        COUNT=$(echo "$NODES" | tail -n +2 | wc -l)
+                        if [ "$COUNT" -ne 3 ]; then
+                            echo "Expected 3 swarm nodes, found ${COUNT}"
+                            exit 1
+                        fi
+                        echo "Fleet OK: 3 swarm nodes."
+                    '''
+                }
+            }
+        }
+
+        stage('Report') {
+            steps {
+                script {
+                    def summary = """
+Provisioned PROD FLEET (3-node Docker Swarm)
+
+  MANAGER   public=${params.MANAGER_PUBLIC_IP}  private=${params.MANAGER_PRIVATE_IP}
+    - Docker + Compose v2 installed
+    - Swarm initialised (advertise-addr ${params.MANAGER_PRIVATE_IP})
+    - Central monitoring stack running
+    - Grafana:    http://${params.MANAGER_PUBLIC_IP}:3000  (admin / RmitMonitor2767!)
+    - Prometheus: http://${params.MANAGER_PUBLIC_IP}:9090
+    - Loki:       http://${params.MANAGER_PRIVATE_IP}:3100  (reachable from workers only)
+
+  WORKER-1  public=${params.WORKER_1_PUBLIC_IP}  private=${params.WORKER_1_PRIVATE_IP}
+    - Docker + Compose v2 installed
+    - Joined swarm at ${params.MANAGER_PRIVATE_IP}:2377
+    - Exporters running: node_exporter:9100, promtail -> Loki
+
+  WORKER-2  public=${params.WORKER_2_PUBLIC_IP}  private=${params.WORKER_2_PRIVATE_IP}
+    - Docker + Compose v2 installed
+    - Joined swarm at ${params.MANAGER_PRIVATE_IP}:2377
+    - Exporters running
+
+To make this fleet the default target for future deploys, add these lines to
+ansible/inventories/prod.ini:
+
+  [swarm_manager]
+  meowgang-prod-swarm-manager ansible_host=${params.MANAGER_PRIVATE_IP}
+
+  [swarm_workers]
+  meowgang-prod-swarm-worker-1 ansible_host=${params.WORKER_1_PRIVATE_IP}
+  meowgang-prod-swarm-worker-2 ansible_host=${params.WORKER_2_PRIVATE_IP}
+
+Or trigger the main deploy pipeline with PROD_MANAGER_IP=${params.MANAGER_PUBLIC_IP}
+to deploy the application to this fleet without editing inventory.
+"""
+                    echo summary
+                    writeFile file: 'reports/provision-prod-summary.txt', text: summary
+                    archiveArtifacts artifacts: 'reports/provision-prod-summary.txt', fingerprint: true
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Prod fleet provisioning complete."
+        }
+        failure {
+            echo "Prod fleet provisioning FAILED. Inspect the failed stage log. Re-run is safe (playbooks are idempotent)."
+        }
+    }
+}
