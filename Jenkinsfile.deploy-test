@@ -637,8 +637,9 @@ pipeline {
                         REPORT_FILE="reports/ansible-staging-connectivity.txt"
 
                         # Honour STAGING_HOST_IP override so we ping the same
-                        # target the deploy stage will hit.
-                        if [ -n "${STAGING_HOST_IP}" ]; then
+                        # target the deploy stage will hit. :- default prevents
+                        # "unbound variable" under set -u when the param is empty.
+                        if [ -n "${STAGING_HOST_IP:-}" ]; then
                             echo "STAGING_HOST_IP=${STAGING_HOST_IP} -> pinging that IP." | tee "${REPORT_FILE}"
                             PING_ARGS="all --inventory ${STAGING_HOST_IP},"
                         else
@@ -746,7 +747,7 @@ EOF
                         # to 'staging'. When we override the inventory we pass
                         # target_hosts=all so the play still matches the one
                         # inline host.
-                        if [ -n "${STAGING_HOST_IP}" ]; then
+                        if [ -n "${STAGING_HOST_IP:-}" ]; then
                             echo "STAGING_HOST_IP=${STAGING_HOST_IP} -> overriding inventory."
                             INVENTORY_ARGS="--inventory ${STAGING_HOST_IP},"
                             HOSTS_OVERRIDE="-e target_hosts=all"
@@ -796,8 +797,9 @@ EOF
                         REPORT_FILE="reports/ansible-prod-connectivity.txt"
 
                         # Honour PROD_MANAGER_IP override so we ping the same
-                        # target the deploy stage will hit.
-                        if [ -n "${PROD_MANAGER_IP}" ]; then
+                        # target the deploy stage will hit. :- default prevents
+                        # "unbound variable" under set -u when the param is empty.
+                        if [ -n "${PROD_MANAGER_IP:-}" ]; then
                             echo "PROD_MANAGER_IP=${PROD_MANAGER_IP} -> pinging that IP." | tee "${REPORT_FILE}"
                             PING_ARGS="all --inventory ${PROD_MANAGER_IP},"
                         else
@@ -892,7 +894,7 @@ EOF
                         # Same pattern as staging: pass target_hosts=all when
                         # overriding so deploy-prod-swarm.yml's hosts pattern
                         # (which defaults to 'swarm_manager') still matches.
-                        if [ -n "${PROD_MANAGER_IP}" ]; then
+                        if [ -n "${PROD_MANAGER_IP:-}" ]; then
                             echo "PROD_MANAGER_IP=${PROD_MANAGER_IP} -> overriding inventory."
                             INVENTORY_ARGS="--inventory ${PROD_MANAGER_IP},"
                             HOSTS_OVERRIDE="-e target_hosts=all"
