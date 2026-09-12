@@ -68,13 +68,19 @@
         line: '/swapfile none swap sw 0 0'
         state: present
 
-    - name: Set vm.swappiness to 10
-      ansible.posix.sysctl:
-        name: vm.swappiness
-        value: '10'
-        state: present
-        sysctl_file: /etc/sysctl.d/99-swappiness.conf
-        reload: true
+    - name: Persist vm.swappiness=10 sysctl setting
+      ansible.builtin.copy:
+        content: "vm.swappiness = 10\n"
+        dest: /etc/sysctl.d/99-swappiness.conf
+        owner: root
+        group: root
+        mode: '0644'
+      register: swappiness_conf
+
+    - name: Apply sysctl changes when swappiness setting changed
+      ansible.builtin.command: sysctl --system
+      when: swappiness_conf.changed
+      changed_when: false
 
     # --- Common directory + shared configs on every monitored host ---
     - name: Ensure monitoring directory exists
