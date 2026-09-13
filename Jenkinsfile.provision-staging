@@ -123,6 +123,34 @@ pipeline {
             }
         }
 
+        stage('Fetch Prod Manager IP (Loki target)') {
+            steps {
+                script {
+                    // Staging's promtail ships logs to Loki, which runs on
+                    // the prod swarm manager. Read that IP from prod.ini so
+                    // this pipeline has no hardcoded coupling to prod.
+                    env.MANAGER_PRIVATE_IP = sh(
+                        returnStdout: true,
+                        script: '''
+                            ansible-inventory \
+                                -i ansible/inventories/prod.ini \
+                                --list \
+                            | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+name = d['swarm_manager']['hosts'][0]
+print(d['_meta']['hostvars'][name]['ansible_host'])
+"
+                        '''
+                    ).trim()
+                    if (!env.MANAGER_PRIVATE_IP) {
+                        error "Could not resolve swarm_manager ansible_host from ansible/inventories/prod.ini"
+                    }
+                    echo "Prod manager private IP (for promtail): ${env.MANAGER_PRIVATE_IP}"
+                }
+            }
+        }
+
         stage('Deploy Monitoring Exporters') {
             steps {
                 withCredentials([
@@ -135,9 +163,12 @@ pipeline {
                     sh '''
                         set -euo pipefail
                         export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
-                        # Staging runs only node_exporter + promtail — the
-                        # central Prometheus/Grafana/Loki live on the prod
-                        # manager (single-Grafana design, Option B).
+                        # Staging runs only node_exporter + promtail. Loki
+                        # (log ingest) + Prometheus (metrics scrape) live on
+                        # the prod swarm manager. Grafana runs separately on
+                        # its own dedicated EC2 and queries prod-manager
+                        # Prometheus + Loki to visualise everything.
+                        # MANAGER_PRIVATE_IP was resolved from prod.ini.
                         ansible-playbook \
                             --inventory ansible/inventories/staging.ini \
                             --limit staging \
@@ -146,7 +177,7 @@ pipeline {
                             -e target_hosts=staging \
                             -e role=exporters \
                             -e env=staging \
-                            -e manager_private_ip=${PROD_MANAGER_PRIVATE_IP} \
+                            -e manager_private_ip=${MANAGER_PRIVATE_IP} \
                             ansible/monitoring.yml
                     '''
                 }
@@ -161,9 +192,10 @@ Staging provisioning complete — targets from ansible/inventories/staging.ini
   - Docker + Compose v2 installed
   - Docker Swarm active (single-node)
   - Monitoring exporters running (node_exporter + promtail)
-  - Metrics + logs shipping to prod manager at ${env.PROD_MANAGER_PRIVATE_IP}
+  - Logs shipping to Loki on prod manager (${env.MANAGER_PRIVATE_IP}:3100)
+  - Metrics scraped by Prometheus on prod manager (${env.MANAGER_PRIVATE_IP}:9090)
 
-Central Grafana (viewing staging data too): http://<prod-manager-public-ip>:3000
+View in Grafana (dedicated observability EC2): http://<grafana-public-ip>:3000
 
 Next: push a commit to trigger the main deploy pipeline. It will deploy the
 app to whatever host is currently in [staging].
