@@ -174,8 +174,8 @@ meowgang-store-staging ansible_host=<PRIVATE_IP> public_ip=<PUBLIC_IP>
 [all:vars]
 ansible_user=ec2-user
 ```
-- `ansible_host` — Jenkins SSHes here (VPC private)
-- `public_ip` — appended to Django `ALLOWED_HOSTS` + used for `CLIENT_URL`; leave empty if you don't need browser access
+- `ansible_host` — REQUIRED. Jenkins SSHes here (VPC private).
+- `public_ip` — OPTIONAL. Leave empty (`public_ip=`) and the deploy still succeeds: the container's `/healthz` check hits `127.0.0.1` which is always in `ALLOWED_HOSTS`. Only fill in when you need users to browse the app via the public IP without getting a Django HTTP 400 "Invalid HTTP_HOST", or want outbound email links (password reset, order confirmation) to point at the real public URL. Recommend allocating an EIP first so the value doesn't rotate.
 
 ### `ansible/inventories/prod.ini`
 ```ini
@@ -193,7 +193,7 @@ swarm_workers
 [all:vars]
 ansible_user=ec2-user
 ```
-- Only manager needs `public_ip` (workers don't accept public traffic — swarm ingress routes via manager).
+- Only manager needs `public_ip` — same "optional" semantics as staging (see above). Workers never need it (swarm ingress lands on the manager).
 
 ### `ansible/inventories/monitoring.ini`
 ```ini
@@ -403,19 +403,9 @@ Fix: update `prod.ini` with new manager IP, push. `provision-monitoring` re-rend
 
 ## GitHub webhook → Jenkins
 
-Every pipeline uses `triggers { githubPush() }`. GitHub POSTs to
-`http://<jenkins-ip>:8080/github-webhook/` on every push and Jenkins runs
-matching jobs (matched by SCM URL + branch).
+Setup on Github on tab Webohook with `http://<jenkins-ip>:8080/github-webhook/` to able auto push commit to Github for enable auto trigger
 
 **Allocate an Elastic IP to Jenkins** — stop/start otherwise invalidates the webhook URL (Learner Lab instances lose their public IP on stop).
-
----
-
-## Local Ansible testing (`test.sh`)
-
-`test.sh` at repo root reproduces every pipeline stage from your laptop against fresh EC2s. Fill in the IPs at the top, ensure the SSH key is at `./meowgang-store-staging-key.pem`, run `./test.sh`. If everything passes locally, the Jenkins pipelines will succeed too.
-
-Note: `test.sh` runs from your laptop (outside VPC), so it uses public IPs for SSH. Jenkins runs inside the VPC and uses private IPs from inventory.
 
 ---
 
@@ -425,3 +415,4 @@ Note: `test.sh` runs from your laptop (outside VPC), so it uses public IPs for S
 - `stack.prod.yml` `AWS_STORAGE_BUCKET_NAME` still points at `meowgang-media-staging-01`. Provision a dedicated prod bucket.
 - Allocate Elastic IPs to Jenkins, prod-manager, staging, Grafana (avoids IP-rotation problems).
 - Bump backend's `restart_policy.max_attempts` to 20 in both stack files (matches frontend — survives cold-start DNS race without manual `--force`).
+- Curently, we don't test on init a new worker node then join a exist node swarm at the moment yet 
