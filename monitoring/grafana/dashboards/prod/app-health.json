@@ -8,54 +8,45 @@
     {
       "id": 1,
       "type": "gauge",
-      "title": "Frontend (nginx serving /)",
-      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "probe_success{env=\"prod\", component=\"frontend\"}", "refId": "A"}],
+      "title": "/healthz",
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 0},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "probe_success{env=\"prod\", instance=~\".*/healthz/\"}", "refId": "A"}],
       "fieldConfig": {"defaults": {"min": 0, "max": 1, "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}},
       "options": {"showThresholdLabels": false, "showThresholdMarkers": true}
     },
     {
       "id": 2,
       "type": "gauge",
-      "title": "Backend /healthz (via nginx proxy)",
-      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 0},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "probe_success{env=\"prod\", component=\"backend\", instance=~\".*/healthz/\"}", "refId": "A"}],
+      "title": "/readyz",
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 0},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "probe_success{env=\"prod\", instance=~\".*/readyz/\"}", "refId": "A"}],
       "fieldConfig": {"defaults": {"min": 0, "max": 1, "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}},
       "options": {"showThresholdLabels": false, "showThresholdMarkers": true}
     },
     {
       "id": 3,
       "type": "gauge",
-      "title": "Backend /readyz (via nginx proxy)",
-      "gridPos": {"h": 6, "w": 6, "x": 12, "y": 0},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "probe_success{env=\"prod\", component=\"backend\", instance=~\".*/readyz/\"}", "refId": "A"}],
+      "title": "/api/version",
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 0},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "probe_success{env=\"prod\", instance=~\".*/api/version/\"}", "refId": "A"}],
       "fieldConfig": {"defaults": {"min": 0, "max": 1, "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}},
       "options": {"showThresholdLabels": false, "showThresholdMarkers": true}
     },
     {
       "id": 4,
-      "type": "gauge",
-      "title": "Backend /api/version (via nginx proxy)",
-      "gridPos": {"h": 6, "w": 6, "x": 18, "y": 0},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "probe_success{env=\"prod\", component=\"backend\", instance=~\".*/api/version/\"}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"min": 0, "max": 1, "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}},
-      "options": {"showThresholdLabels": false, "showThresholdMarkers": true}
-    },
-    {
-      "id": 5,
       "type": "table",
       "title": "HTTP status codes",
       "gridPos": {"h": 6, "w": 24, "x": 0, "y": 6},
       "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "probe_http_status_code{env=\"prod\"}", "refId": "A", "instant": true, "format": "table"}],
-      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "job": true, "__name__": true, "env": true}, "renameByName": {"instance": "Endpoint", "component": "Component", "Value": "HTTP status"}}}],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "job": true, "__name__": true, "env": true}, "renameByName": {"instance": "Endpoint", "Value": "HTTP status"}}}],
       "fieldConfig": {"defaults": {"custom": {"align": "center", "displayMode": "color-background"}, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 200}, {"color": "orange", "value": 300}, {"color": "red", "value": 400}]}}}
     },
     {
-      "id": 6,
+      "id": 5,
       "type": "timeseries",
       "title": "Probe latency (s)",
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "probe_duration_seconds{env=\"prod\"}", "legendFormat": "{{component}} {{instance}}", "refId": "A"}]
+      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "probe_duration_seconds{env=\"prod\"}", "legendFormat": "{{instance}}", "refId": "A"}]
     }
   ]
 }
