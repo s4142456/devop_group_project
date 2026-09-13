@@ -119,7 +119,7 @@ Post-block:
 | `Configure-rmit-store-sever-staging` | `[staging]` |
 | `Configure-rmit-store-sever-prod` | `[swarm_manager]` + `[swarm_workers]` |
 | `Configure-rmit-store-sever-monitoring` | `[monitoring]` |
-| `rmit-store-cicd` (main) | staging then prod |
+| `Fork-rmit-store-cicd-new` (main) | staging then prod |
 
 **Order matters only if the app deploy races the provision:** the main pipeline's `Deploy to Staging` stage assumes staging swarm is already initialised. On a totally cold start, disable the main pipeline's webhook trigger, run the 3 provision pipelines first, then enable the main pipeline and push again.
 
@@ -412,7 +412,8 @@ Setup on Github on tab Webohook with `http://<jenkins-ip>:8080/github-webhook/` 
 ## TODOs before submission
 
 - Swap `personal-email-recipients` → `jenkins-failure-email-recipients` in `Jenkinsfile`'s `post { failure {} }` + `post { fixed {} }`.
-- `stack.prod.yml` `AWS_STORAGE_BUCKET_NAME` still points at `meowgang-media-staging-01`. Provision a dedicated prod bucket.
+- `stack.prod.yml` `AWS_STORAGE_BUCKET_NAME` still points at `meowgang-media-staging-01`. Can provision a dedicated prod bucket.
 - Allocate Elastic IPs to Jenkins, prod-manager, staging, Grafana (avoids IP-rotation problems).
 - Bump backend's `restart_policy.max_attempts` to 20 in both stack files (matches frontend — survives cold-start DNS race without manual `--force`).
 - Curently, we don't test on init a new worker node then join a exist node swarm at the moment yet 
+- Also, on UI jenkins at the moment you will see there are 4 pipelines Configure-rmit-store-sever-staging,  Configure-rmit-store-sever-monitoring, Configure-rmit-store-sever-prod, Fork-rmit-store-cicd-new, at the moment this pipeline still trigger to build on different branch not main branch. You can click on Configure tab of Jenkins job to switch on Branch Specifier from the current branch to */main or the branch you want to buil
