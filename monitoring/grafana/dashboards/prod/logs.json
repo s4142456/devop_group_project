@@ -7,19 +7,16 @@
   "templating": {
     "list": [
       {
-        "name": "service",
-        "type": "custom",
-        "label": "Service",
-        "query": "backend, frontend, db",
-        "current": {"selected": true, "text": "All", "value": "$__all"},
-        "options": [
-          {"selected": true, "text": "All", "value": "$__all"},
-          {"selected": false, "text": "backend", "value": "backend"},
-          {"selected": false, "text": "frontend", "value": "frontend"},
-          {"selected": false, "text": "db", "value": "db"}
-        ],
-        "includeAll": true,
-        "multi": true
+        "name": "container",
+        "type": "query",
+        "label": "Container",
+        "datasource": {"type": "loki", "uid": "loki"},
+        "query": "label_values({env=\"prod\"}, container)",
+        "regex": "/^rmit.*/",
+        "refresh": 2,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false
       }
     ]
   },
@@ -27,12 +24,12 @@
     {
       "id": 1,
       "type": "logs",
-      "title": "App container logs (backend / frontend / db) — env=prod",
+      "title": "Container logs — env=prod",
       "gridPos": {"h": 20, "w": 24, "x": 0, "y": 0},
       "targets": [
         {
           "datasource": {"type": "loki", "uid": "loki"},
-          "expr": "{env=\"prod\", compose_service=~\"$service\"}",
+          "expr": "{env=\"prod\", container=\"$container\"}",
           "refId": "A"
         }
       ],

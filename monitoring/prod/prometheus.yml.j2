@@ -60,12 +60,22 @@ scrape_configs:
     params:
       module: [http_2xx]
     static_configs:
+      # Frontend-only probe: nginx serves the Vue index directly for `/`.
+      # Green here + red on /healthz means backend is down but nginx up.
+      - targets:
+          - http://host.docker.internal/
+        labels:
+          env: prod
+          component: frontend
+      # Backend probes: /healthz, /readyz, /api/version all hit Django via
+      # nginx reverse proxy. Green here = full stack (frontend + backend) up.
       - targets:
           - http://host.docker.internal/healthz/
           - http://host.docker.internal/readyz/
           - http://host.docker.internal/api/version/
         labels:
           env: prod
+          component: backend
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target
@@ -81,14 +91,20 @@ scrape_configs:
     params:
       module: [http_2xx]
     static_configs:
-      - targets:
 {% for h in groups['staging'] %}
+      - targets:
+          - http://{{ hostvars[h].ansible_host }}/
+        labels:
+          env: staging
+          component: frontend
+      - targets:
           - http://{{ hostvars[h].ansible_host }}/healthz/
           - http://{{ hostvars[h].ansible_host }}/readyz/
           - http://{{ hostvars[h].ansible_host }}/api/version/
-{% endfor %}
         labels:
           env: staging
+          component: backend
+{% endfor %}
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target

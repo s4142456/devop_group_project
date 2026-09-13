@@ -51,7 +51,7 @@ services:
       restart_policy:
         condition: any
         delay: 5s
-        max_attempts: 3
+        max_attempts: 20
       update_config:
         order: stop-first
         parallelism: 1
@@ -112,7 +112,7 @@ services:
       restart_policy:
         condition: any
         delay: 5s
-        max_attempts: 3
+        max_attempts: 20
       update_config:
         order: stop-first
         parallelism: 1
