@@ -181,10 +181,27 @@
         mode: '0644'
       when: role == 'grafana'
 
+    - name: Ensure Grafana subdirectories exist
+      ansible.builtin.file:
+        path: "{{ monitoring_dir }}/grafana/{{ item }}"
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: '0755'
+      loop:
+        - dashboards
+        - provisioning
+        - provisioning/dashboards
+      when: role == 'grafana'
+
     - name: Copy Grafana dashboards + dashboard provider config
       ansible.builtin.copy:
-        src: "../monitoring/grafana/{{ item }}"
-        dest: "{{ monitoring_dir }}/grafana/{{ item }}"
+        # Trailing slash on src copies CONTENTS (not the directory itself).
+        # Without it Ansible nests the source dir under dest, producing
+        # .../dashboards/dashboards/... — Grafana provisioning then finds
+        # nothing at the configured path and the UI is empty.
+        src: "../monitoring/grafana/{{ item }}/"
+        dest: "{{ monitoring_dir }}/grafana/{{ item }}/"
         owner: ec2-user
         group: ec2-user
         directory_mode: '0755'
