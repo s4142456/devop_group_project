@@ -5,24 +5,29 @@
 # Acknowledgement: Ansible documentation, Docker Compose documentation,
 # Prometheus, Grafana, Loki, Promtail documentation.
 
-# Provision the monitoring stack on a target host. Two roles:
+# Provision the monitoring stack on a target host. Three roles:
 #
-#   role=central       Central Prometheus + Grafana + Loki + Promtail +
-#                      node_exporter + blackbox_exporter. Runs on the staging
-#                      host or the prod swarm manager.
+#   role=central       Central Prometheus + Loki + Promtail + node_exporter +
+#                      blackbox_exporter. Runs on the prod swarm manager
+#                      (or, if env=staging, on the staging host).
+#                      Grafana is NOT included here — it lives on a dedicated
+#                      observability EC2 (role=grafana).
 #
 #   role=exporters     Only node_exporter + Promtail. Runs on prod swarm
-#                      workers. Ships metrics/logs to the central manager.
+#                      workers and on staging. Ships metrics/logs to central.
 #
-# env variable (staging|prod) selects the correct Prometheus scrape config
-# for the central role.
+#   role=grafana       Only Grafana. Runs on the dedicated monitoring EC2.
+#                      Datasources are templated to reach Prometheus and Loki
+#                      on the prod swarm manager over the private network.
+#
+# env variable (staging|prod|monitoring) selects the correct Prometheus
+# scrape config for the central role and labels for exporters.
 #
 # Required variables:
 #   role, env, target_hosts (inventory group)
-#   For role=central AND env=prod:
-#     worker_1_private_ip, worker_2_private_ip
-#   For role=exporters:
-#     manager_private_ip
+#   For role=exporters:  manager_private_ip
+#   For role=grafana:    inventory must include [swarm_manager] group so the
+#                        datasources template can look up its private IP.
 
 ---
 - name: Provision monitoring stack
@@ -124,16 +129,6 @@
         mode: '0644'
       when: role == 'central'
 
-    - name: Copy Grafana provisioning + dashboards
-      ansible.builtin.copy:
-        src: ../monitoring/grafana/
-        dest: "{{ monitoring_dir }}/grafana/"
-        owner: ec2-user
-        group: ec2-user
-        directory_mode: '0755'
-        mode: '0644'
-      when: role == 'central'
-
     - name: Copy staging prometheus.yml
       ansible.builtin.copy:
         src: ../monitoring/staging/prometheus.yml
@@ -164,6 +159,58 @@
       changed_when: "'Started' in compose_up_central.stderr or 'Recreated' in compose_up_central.stderr or 'Created' in compose_up_central.stderr"
       when: role == 'central'
 
+    - name: Wait for Prometheus to be reachable
+      ansible.builtin.uri:
+        url: http://127.0.0.1:9090/-/ready
+        status_code: 200
+      register: prometheus_health
+      retries: 30
+      delay: 5
+      until: prometheus_health.status == 200
+      when: role == 'central'
+
+    # ============================================================
+    # ROLE: grafana (dedicated observability EC2)
+    # ============================================================
+    - name: Copy grafana compose file
+      ansible.builtin.copy:
+        src: ../monitoring/compose.grafana.yml
+        dest: "{{ monitoring_dir }}/compose.grafana.yml"
+        owner: ec2-user
+        group: ec2-user
+        mode: '0644'
+      when: role == 'grafana'
+
+    - name: Copy Grafana dashboards + dashboard provider config
+      ansible.builtin.copy:
+        src: "../monitoring/grafana/{{ item }}"
+        dest: "{{ monitoring_dir }}/grafana/{{ item }}"
+        owner: ec2-user
+        group: ec2-user
+        directory_mode: '0755'
+        mode: '0644'
+      loop:
+        - dashboards
+        - provisioning/dashboards
+      when: role == 'grafana'
+
+    - name: Render Grafana datasources (points at prod-manager Prometheus + Loki)
+      ansible.builtin.template:
+        src: ../monitoring/grafana/provisioning/datasources/datasources.yml.j2
+        dest: "{{ monitoring_dir }}/grafana/provisioning/datasources/datasources.yml"
+        owner: ec2-user
+        group: ec2-user
+        mode: '0644'
+      when: role == 'grafana'
+
+    - name: Start Grafana
+      ansible.builtin.command:
+        chdir: "{{ monitoring_dir }}"
+        cmd: docker compose -f compose.grafana.yml up -d --pull always --remove-orphans --force-recreate
+      register: compose_up_grafana
+      changed_when: "'Started' in compose_up_grafana.stderr or 'Recreated' in compose_up_grafana.stderr or 'Created' in compose_up_grafana.stderr"
+      when: role == 'grafana'
+
     - name: Wait for Grafana to be reachable
       ansible.builtin.uri:
         url: http://127.0.0.1:3000/api/health
@@ -172,10 +219,10 @@
       retries: 30
       delay: 5
       until: grafana_health.status == 200
-      when: role == 'central'
+      when: role == 'grafana'
 
     # ============================================================
-    # ROLE: exporters (prod swarm workers)
+    # ROLE: exporters (prod swarm workers, staging)
     # ============================================================
     - name: Copy exporters compose file
       ansible.builtin.copy:
@@ -203,10 +250,15 @@
       changed_when: "'Started' in compose_up_exporters.stderr or 'Recreated' in compose_up_exporters.stderr or 'Created' in compose_up_exporters.stderr"
       when: role == 'exporters'
 
-    - name: Report central stack URL
+    - name: Report central stack URLs
       ansible.builtin.debug:
-        msg: "Central monitoring stack running. Grafana: http://{{ ansible_host }}:3000 (admin / RmitMonitor2767!)"
+        msg: "Central stack running on {{ ansible_host }} — Prometheus:9090, Loki:3100, blackbox:9115. Grafana lives on the dedicated observability EC2."
       when: role == 'central'
+
+    - name: Report grafana URL
+      ansible.builtin.debug:
+        msg: "Grafana running on {{ ansible_host }}: http://<public-ip>:3000 (admin / RmitMonitor2767!)"
+      when: role == 'grafana'
 
     - name: Report exporters running
       ansible.builtin.debug:

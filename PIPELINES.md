@@ -1,19 +1,40 @@
 # DevOps Pipelines — Reference
 
-Summary of the CI/CD, provisioning, orchestration and monitoring artefacts
-delivered on the `provision-and-restructure` branch. Purpose: give a marker
-(or a future team member) a single page they can read before diving into any
-specific file.
+Reference doc for the CI/CD, provisioning, orchestration and monitoring
+setup. Purpose: a single page a marker or new team member can read before
+diving into any specific file.
 
 ---
 
-## The three Jenkins pipelines
+## Fleet topology
 
-| Jenkinsfile | Purpose | Trigger | Runs against |
+| EC2 role | How many | What runs on it | Provisioned by |
 |---|---|---|---|
-| `Jenkinsfile` | **Main CI/CD** — tests, builds, publishes images, deploys to staging AND production | GitHub webhook (`push`) OR manual "Build with Parameters" | Existing hosts in `ansible/inventory.ini`, or IPs supplied at build time |
-| `Jenkinsfile.provision-staging` | **One-shot** provisioning of a fresh staging EC2 | Manual "Build with Parameters" | The IPs you type in |
-| `Jenkinsfile.provision-prod` | **One-shot** provisioning of a fresh 3-EC2 prod fleet (1 manager + 2 workers) | Manual "Build with Parameters" | The 6 IPs you type in |
+| **Jenkins** | 1 | Jenkins server (agent = master, single-node) | Manual |
+| **Staging** | 1 | Application (Compose, single-node) + monitoring exporters | `Jenkinsfile.provision-staging` |
+| **Prod swarm manager** | 1 | Docker Swarm manager + application `db` + central monitoring (Prometheus, Loki, blackbox, node_exporter, promtail) | `Jenkinsfile.provision-prod` |
+| **Prod swarm workers** | 2+ | Docker Swarm workers + application `backend`/`frontend` + monitoring exporters | `Jenkinsfile.provision-prod` |
+| **Grafana** | 1 | Grafana ONLY (dedicated observability box) — queries Prometheus + Loki on prod manager over the VPC | `Jenkinsfile.provision-monitoring` |
+
+Jenkins and every target EC2 are in the **same AWS VPC** so Jenkins reaches
+all hosts via **private IP** (no `_PUBLIC_IP` params).
+
+---
+
+## The four Jenkins pipelines
+
+| Jenkinsfile | Purpose | Trigger | Target hosts read from |
+|---|---|---|---|
+| `Jenkinsfile` | **Main CI/CD** — tests, builds, publishes images to ECR, deploys to staging AND prod | GitHub webhook (`push`) OR manual | `ansible/inventories/{staging,prod}.ini` |
+| `Jenkinsfile.provision-staging` | **Provision** a fresh staging EC2 | GitHub webhook OR manual | `ansible/inventories/staging.ini` |
+| `Jenkinsfile.provision-prod` | **Provision** a fresh (or grow an existing) prod fleet: 1 manager + N workers | GitHub webhook OR manual | `ansible/inventories/prod.ini` |
+| `Jenkinsfile.provision-monitoring` | **Provision** the dedicated Grafana EC2 | GitHub webhook OR manual | `ansible/inventories/monitoring.ini` (+ `prod.ini` for datasource lookup) |
+
+### Adding / replacing a host
+
+Edit the private IP in the relevant inventory file, commit + push, and the
+corresponding provision pipeline re-runs. Playbooks are idempotent — hosts
+that are already provisioned are skipped, new hosts are set up.
 
 ### `Jenkinsfile` — main CI/CD (13 stages)
 
@@ -24,36 +45,54 @@ Checkout → Validate Repo → Show Info → Backend Tests → Controlled Failur
   → Validate Production Connectivity → Deploy to Production
 ```
 
-Runtime knobs (all optional):
+Params:
 
 | Param | Default | Effect |
 |---|---|---|
-| `DEMO_INTENTIONAL_FAILURE` | `false` | Runs `server/tests/failure/test_pipeline_failure.py` which is designed to fail. Proves a bad commit blocks staging + prod. |
-| `DEMO_STAGING_HEALTH_FAILURE` | `false` | Deploys staging with a deliberately broken `ALLOWED_HOSTS`. Django rejects the health probe → staging goes red → prod stages skipped. Proves the staging health gate. |
-| `STAGING_HOST_IP` | empty | If set, staging deploy targets THAT public IP instead of `ansible/inventory.ini [staging]`. Lets a freshly provisioned staging EC2 receive the app without editing inventory. |
-| `PROD_MANAGER_IP` | empty | Same idea for prod swarm manager (`[swarm_manager]` fallback). |
+| `DEMO_INTENTIONAL_FAILURE` | `false` | Runs a test designed to fail. Proves a bad commit blocks staging + prod. |
+| `DEMO_STAGING_HEALTH_FAILURE` | `false` | Deploys staging with a broken `ALLOWED_HOSTS`. Django rejects the health probe → staging goes red → prod stages skipped. |
+
+Target hosts: no IP params — the pipeline reads
+`ansible/inventories/staging.ini` for the `Deploy to Staging` stage and
+`ansible/inventories/prod.ini` for the `Deploy to Production` stage.
+To repoint at a different EC2, edit the inventory and push.
 
 Failure handling in `post {}`:
-- `failure` → sends HTML email + attached log to recipients from Jenkins credential `personal-email-recipients` (TODO before submission: swap to `jenkins-failure-email-recipients` which holds the team distribution list).
-- `fixed` → sends "green again" email when a build passes after previous failure.
+- `failure` → sends HTML email + attached log to `personal-email-recipients` (TODO before submission: swap to `jenkins-failure-email-recipients`).
+- `fixed` → sends "green again" email.
 
-### `Jenkinsfile.provision-staging` (6 stages)
+### `Jenkinsfile.provision-staging` (5 stages)
 
-Takes `STAGING_PUBLIC_IP` + `STAGING_PRIVATE_IP`. Runs `setup-hosts.yml` (Docker + Compose plugin) then `monitoring.yml` (role=central env=staging). Reports Grafana URL + inventory line to paste.
+1. Checkout
+2. Verify SSH to `[staging]`
+3. `setup-hosts.yml`      — Docker + Compose plugin
+4. `init-swarm.yml`       — single-node swarm (advertise_addr defaults to `ansible_host` / private IP)
+5. `monitoring.yml`       — `role=exporters env=staging`; promtail ships logs to prod-manager Loki
 
-### `Jenkinsfile.provision-prod` (10 stages)
+### `Jenkinsfile.provision-prod` (9 stages)
 
-Takes 6 IPs (public + private for manager, worker-1, worker-2). Runs:
+1. Checkout
+2. Verify SSH to `[production]` (manager + workers)
+3. `setup-hosts.yml` on ALL hosts
+4. `init-swarm.yml` on manager
+5. Fetch manager private IP + worker join token
+6. `join-swarm.yml` on `[swarm_workers]` (idempotent — already-joined workers skipped)
+7. `monitoring.yml` `role=exporters env=prod` on `[swarm_workers]` (ships to manager Loki)
+8. `monitoring.yml` `role=central env=prod` on `[swarm_manager]` (Prometheus + Loki + blackbox + node_exporter + promtail; passes prod.ini + staging.ini so scrape config includes both envs)
+9. Verify `docker node ls` reports all nodes
 
-1. Setup Docker on all 3 hosts
-2. Init Swarm on manager (captures worker join token)
-3. Deploy central monitoring on manager (with worker IPs baked into `prometheus.yml`)
-4. Join worker-1 to Swarm + deploy exporters-only stack
-5. Join worker-2 to Swarm + deploy exporters-only stack
-6. Verify `docker node ls` reports 3 nodes
-7. Print Grafana URL + inventory lines
+Add a new worker: append to `[swarm_workers]` in `prod.ini`, push. The
+pipeline re-runs, joins the new worker, installs its exporters, and
+re-renders `prometheus.yml` on the manager so the scrape config includes it.
 
-All playbooks are idempotent — re-running after fixing an error is safe.
+### `Jenkinsfile.provision-monitoring` (4 stages)
+
+1. Checkout
+2. Verify SSH to `[monitoring]`
+3. `setup-hosts.yml`     — Docker + Compose plugin
+4. `monitoring.yml` `role=grafana env=monitoring` — copies `compose.grafana.yml`, renders `datasources.yml.j2` with prod-manager private IP (looked up from prod.ini), copies dashboards, starts Grafana
+
+Prerequisite: prod fleet must be provisioned first (Grafana needs Prometheus + Loki reachable).
 
 ---
 
@@ -61,23 +100,27 @@ All playbooks are idempotent — re-running after fixing an error is safe.
 
 | File | When it runs | What it does |
 |---|---|---|
-| `ansible/setup-hosts.yml` | **Provision** (once per host) | Installs Docker, Docker Compose v2 plugin, adds ec2-user to docker group, creates `/home/ec2-user/app` |
-| `ansible/init-swarm.yml` | **Provision** (once, manager only) | `docker swarm init --advertise-addr <private-ip>`. Idempotent — skips if swarm already active. |
-| `ansible/join-swarm.yml` | **Provision** (once per worker) | Joins the manager using the worker token. Skips if already joined. |
-| `ansible/monitoring.yml` | **Provision** (once per host) | Two roles: `central` (Prometheus + Grafana + Loki + Promtail + node_exporter + blackbox_exporter) OR `exporters` (node_exporter + Promtail shipping to central Loki). Also creates a 2 GB swap file and sets `vm.swappiness=10`. |
-| `ansible/deploy-staging.yml` | **Every deploy** | Copies `compose.staging.yml` + renders `.env` on host, `docker compose pull && up -d`, waits for `/healthz`. |
-| `ansible/deploy-prod-swarm.yml` | **Every deploy** | Copies `stack.prod.yml`, `docker stack deploy` with env vars, waits for services to converge + `/healthz`. |
-| `ansible/deploy-prod.yml` | Fallback only | Same as staging but targets prod manager. Kept for emergency compose-based redeploy. |
+| `ansible/setup-hosts.yml` | Provision (once per host) | Docker, Docker Compose v2 plugin, adds ec2-user to docker group, creates workspace dir |
+| `ansible/init-swarm.yml` | Provision (once per swarm manager / single-node staging) | `docker swarm init --advertise-addr <private-ip>`. Idempotent. |
+| `ansible/join-swarm.yml` | Provision (once per prod worker) | Joins the manager using the worker token. Skips if already joined. |
+| `ansible/monitoring.yml` | Provision (once per host) | Three roles: `central` (Prometheus + Loki + blackbox + node_exporter + promtail on prod manager), `exporters` (node_exporter + promtail on workers / staging), `grafana` (Grafana on the dedicated observability EC2). Also creates a 2 GB swap file. |
+| `ansible/deploy-staging.yml` | Every app deploy | Copies `compose.staging.yml`, renders `.env`, `docker compose pull && up -d`, waits for `/healthz`. |
+| `ansible/deploy-prod-swarm.yml` | Every app deploy | Copies `stack.prod.yml`, `docker stack deploy` with env vars, waits for services + `/healthz`. |
+| `ansible/deploy-prod.yml` | Fallback only | Compose-based prod deploy. Kept for emergency redeploy. |
 
-Both deploy playbooks read `hosts:` from a variable that defaults to their expected inventory group (`staging` / `swarm_manager`). When Jenkins overrides the target IP via `STAGING_HOST_IP` / `PROD_MANAGER_IP`, it also passes `-e target_hosts=all` so the single-host inline inventory matches.
+`hosts:` in every playbook is a variable that defaults to the expected
+inventory group (`staging` / `swarm_manager` / `swarm_workers` / `monitoring`).
+Pipelines pass `-e target_hosts=<group>` for explicitness.
 
 ### Inventory files
 
-- `ansible/inventory.ini` — flat file with `[staging]`, `[swarm_manager]`, `[swarm_workers]`, `[production:children]`. Read by the main Jenkinsfile pipelines.
-- `ansible/inventories/staging.ini` — staging group only.
-- `ansible/inventories/prod.ini` — prod groups only.
+- `ansible/inventories/staging.ini` — `[staging]` group (private IPs)
+- `ansible/inventories/prod.ini`    — `[swarm_manager]`, `[swarm_workers]`, `[production:children]`
+- `ansible/inventories/monitoring.ini` — `[monitoring]` group (the dedicated Grafana box)
 
-The inventories/ folder is provided for cleanliness (a single-env playbook run doesn't need to know about the other env). The main pipeline still uses `inventory.ini` because that's what the existing Jenkins jobs point at.
+**Single source of truth**. Every pipeline + playbook reads private IPs
+from here. `ansible/ansible.cfg` no longer sets a default inventory —
+callers pass `-i` explicitly.
 
 ---
 
@@ -85,141 +128,130 @@ The inventories/ folder is provided for cleanliness (a single-env playbook run d
 
 | File | Deployed by | Orchestrator | Purpose |
 |---|---|---|---|
-| `compose.staging.yml` | `deploy-staging.yml` | Docker Compose | Staging app — single-node, hardcoded container names, `depends_on: service_healthy` |
-| `compose.prod.yml` | `deploy-prod.yml` (fallback) | Docker Compose | Prod compose fallback |
-| `stack.prod.yml` | `deploy-prod-swarm.yml` | **Docker Swarm** | Prod on 3-node swarm |
-| `compose.yml` | (local dev only) | Docker Compose | Untouched — kept for developer laptops |
-| `compose.ci.yml` | Jenkinsfile Playwright stage | Docker Compose | Ephemeral env for E2E tests during CI |
+| `compose.staging.yml` | `deploy-staging.yml` | Docker Compose | Staging — single-node |
+| `stack.prod.yml` | `deploy-prod-swarm.yml` | **Docker Swarm** | Prod — 3-node swarm |
+| `compose.prod.yml` | `deploy-prod.yml` (fallback) | Docker Compose | Compose fallback |
+| `compose.yml` | (local dev only) | Docker Compose | Untouched — developer laptops |
+| `compose.ci.yml` | Jenkinsfile Playwright stage | Docker Compose | Ephemeral env for E2E tests |
 
 ### `stack.prod.yml` — Swarm-specific notes
 
-Because Swarm silently ignores several Compose features, this file differs from `compose.prod.yml`:
-
-- **No `container_name`** — Swarm names containers itself (`rmit-store_<service>.<slot>.<id>`).
-- **No `depends_on.condition: service_healthy`** — Swarm ignores it. Startup ordering handled by container healthchecks + restart policy.
-- **`restart: unless-stopped` moved to `deploy.restart_policy`** — Compose-style restart is ignored.
-- **`deploy:` block per service** — `replicas`, `restart_policy`, `update_config`, `rollback_config`, `placement.constraints`.
-
-Placement:
-- `db` pinned to `node.role == manager` (its volume follows the manager).
-- `backend` + `frontend` pinned to `node.role == worker`.
-
-Network alias fix on `backend`:
-```yaml
-networks:
-  rmit-store-net:
-    aliases:
-      - rmit-store-backend
-```
-Reason: `client/nginx.conf` hardcodes `proxy_pass http://rmit-store-backend:8000;` which was the Compose container_name. Under Swarm the service is named `backend`, so we alias it back to the old name so the frontend image works unchanged.
-
-### Known Swarm quirk on cold start
-
-nginx resolves DNS at container start. If the frontend container comes up before Swarm's embedded DNS has fully registered the backend, nginx errors "host not found in upstream" and the container dies. `restart_policy.max_attempts` on frontend is set to a value big enough (>3) to survive this race — after backend is registered, a subsequent restart succeeds. If frontend still shows `0/1` after a fresh `docker stack deploy`, run `docker service update --force rmit-store_frontend` to give it another kick.
+- No `container_name` — Swarm names containers itself.
+- No `depends_on.condition: service_healthy` — Swarm ignores it.
+- `restart: unless-stopped` moved to `deploy.restart_policy`.
+- `deploy:` block per service: `replicas`, `restart_policy`, `update_config`, `rollback_config`, `placement.constraints`.
+- `db` pinned to `node.role == manager`; `backend`/`frontend` pinned to `node.role == worker`.
+- Network alias `rmit-store-backend` on the `backend` service so `client/nginx.conf`'s hardcoded `proxy_pass http://rmit-store-backend:8000;` works under swarm (where the actual service name is `backend`).
 
 ---
 
 ## Monitoring stack
 
-Central stack lives in `monitoring/compose.monitoring.yml`; per-node exporter stack lives in `monitoring/exporters/compose.exporters.yml`.
+| Component | Runs on | Purpose |
+|---|---|---|
+| Prometheus | Prod swarm manager | Scrapes node_exporter (all hosts) + blackbox probes |
+| Loki | Prod swarm manager | Receives log pushes from every host's promtail |
+| blackbox_exporter | Prod swarm manager | HTTP probes for `/healthz`, `/readyz`, `/api/version` |
+| node_exporter | Every host | Host CPU/mem/disk metrics |
+| promtail | Every host | Ships Docker container logs to Loki |
+| **Grafana** | **Dedicated monitoring EC2** | Single UI serving both env dashboards; queries Prometheus + Loki over VPC |
 
 ### Layout
 
 ```
 monitoring/
-├── compose.monitoring.yml         Central stack (prometheus, grafana, loki,
-│                                   promtail, node_exporter, blackbox_exporter)
+├── compose.monitoring.yml        Central stack (prometheus + loki + blackbox +
+│                                  node_exporter + promtail). NOT grafana.
+├── compose.grafana.yml           Grafana-only stack (for the dedicated EC2).
 ├── shared/
-│   ├── loki-config.yml            filesystem storage, 24h retention
-│   ├── promtail-config.yml        tails Docker container logs, ships to Loki
-│   └── blackbox.yml               HTTP prober with Host: 127.0.0.1 header
-│                                   override (so Django accepts the probe)
+│   ├── loki-config.yml
+│   ├── promtail-config.yml.j2    Rendered on prod manager with env=prod label
+│   └── blackbox.yml
 ├── grafana/
-│   ├── dashboards/
-│   │   ├── app-health.json        /healthz + /readyz + /api/version + status
-│   │   │                           codes + probe latency
-│   │   ├── host-resources.json    CPU %, Memory %, Disk %, load avg
-│   │   └── logs.json              Live tail with per-container filter
+│   ├── dashboards/{prod,staging}/{app-health,host-resources,logs}.json
 │   └── provisioning/
-│       ├── datasources/           Prometheus (uid=prometheus) + Loki (uid=loki)
-│       └── dashboards/            Auto-load provider config
-├── staging/
-│   └── prometheus.yml             Scrapes localhost node_exporter + blackbox
-│                                   probes against host.docker.internal
-├── prod/
-│   └── prometheus.yml.j2          Jinja template — rendered with worker
-│                                   IPs at provision time to scrape all 3 nodes
+│       ├── datasources/datasources.yml.j2   Templated — Prometheus + Loki URLs
+│       │                                    embed prod-manager private IP
+│       └── dashboards/dashboards.yml        Two providers: "RMIT Store Prod"
+│                                            + "RMIT Store Staging" folders
+├── prod/prometheus.yml.j2        Rendered on prod manager — scrapes prod
+│                                  workers (from prod.ini) + staging (from
+│                                  staging.ini)
 └── exporters/
-    ├── compose.exporters.yml      Just node_exporter + promtail (for workers)
-    └── promtail-config.yml.j2     Jinja template — clients.url points at the
-                                   manager's Loki
+    ├── compose.exporters.yml     node_exporter + promtail
+    └── promtail-config.yml.j2    Rendered per env; ships to prod-manager Loki
 ```
 
-### Deployment topology
+### Grafana dashboards
 
-| Env | Where central stack runs | Where exporters run |
-|---|---|---|
-| Staging | Single EC2 (co-located with app) | Same EC2 (built into central compose) |
-| Prod | Manager EC2 (co-located with `db`) | Manager + both workers |
+Two folders in Grafana, each filtered by `env`:
 
-Grafana admin password: `RmitMonitor2767!` (hardcoded in `compose.monitoring.yml` env for the demo — in a real project this would be a secret from Ansible Vault or Docker secrets).
+- `RMIT Store Prod` — `{env="prod"}` in every panel
+- `RMIT Store Staging` — `{env="staging"}` in every panel
+
+Each folder has 3 dashboards: `app-health`, `host-resources`, `logs`.
+Logs dashboard restricts `compose_service` to `backend|frontend|db` so
+monitoring containers don't pollute application log tails.
 
 ### Runtime tuning (fits t3.small — 2 GB RAM)
 
 - Prometheus: `24h` retention, `500MB` max, scrape interval `30s`, `mem_limit: 400m`
-- Loki: filesystem storage, 24h retention, `mem_limit: 300m`
-- Grafana: `mem_limit: 200m`
+- Loki: filesystem, 24h retention, `mem_limit: 300m`
+- Grafana: `mem_limit: 300m` (has its own EC2 now — could raise if needed)
 - Promtail: `mem_limit: 100m`
-- Node exporter + Blackbox exporter: `mem_limit: 40m` each
-- 2 GB swap file + `vm.swappiness=10` provisioned by `ansible/monitoring.yml`
-
-Total memory ceiling ~1.1 GB — leaves headroom for the app on the same host.
+- node_exporter / blackbox_exporter: `mem_limit: 40m` each
 
 ---
 
 ## Security group configuration
 
-The 3 prod EC2s must sit in a security group with these inbound rules for Swarm + monitoring to work. Same SG is attached to all 3 hosts.
+### Prod fleet SG (attached to manager + all workers)
 
-### Swarm cluster ports — MUST be self-referential (source = the SG itself)
+**Self-referential** = source is the SG itself.
 
 | Type | Protocol | Port | Source | Why |
 |---|---|---|---|---|
-| Custom TCP | TCP | 2377 | self-SG | Swarm cluster management (managers listen; workers connect) |
+| Custom TCP | TCP | 2377 | self-SG | Swarm cluster management |
 | Custom TCP | TCP | 7946 | self-SG | Node-to-node gossip |
-| Custom UDP | UDP | 7946 | self-SG | Node-to-node gossip (both required — MISSING THIS ONE was a bug we hit) |
-| Custom UDP | UDP | 4789 | self-SG | VXLAN overlay data plane (containers on different nodes talking) |
-
-**Symptom if any of these is missing**: swarm nodes see each other in `docker node ls` (that only needs TCP 2377), but containers on workers can't reach the DB on the manager. Django prints `psycopg.errors.ConnectionTimeout`. Same failure mode regardless of which port is blocked.
-
-### Monitoring ports — self-referential (only prod/worker nodes need these)
-
-| Type | Protocol | Port | Source | Why |
-|---|---|---|---|---|
+| Custom UDP | UDP | 7946 | self-SG | Node-to-node gossip |
+| Custom UDP | UDP | 4789 | self-SG | VXLAN overlay data plane |
+| Custom TCP | TCP | 9100 | monitoring SG | Prometheus (on manager) scrapes node_exporter on workers; Grafana host doesn't scrape but the manager also needs to reach its own workers |
 | Custom TCP | TCP | 3100 | self-SG | Workers' promtail push logs to manager's Loki |
-| Custom TCP | TCP | 9100 | self-SG | Manager's Prometheus scrapes workers' node_exporter |
+| Custom TCP | TCP | 9090 | monitoring SG | Grafana reads Prometheus |
+| Custom TCP | TCP | 3100 | monitoring SG | Grafana reads Loki |
+| SSH | TCP | 22 | Jenkins SG | Jenkins runs Ansible playbooks |
+| HTTP | TCP | 80 | 0.0.0.0/0 | Public application access (via Swarm ingress) |
+| Custom TCP | TCP | 9090 | your admin IP | Prometheus UI (debugging only) |
 
-### External access — from your admin IP
+### Staging SG
 
 | Type | Protocol | Port | Source | Why |
 |---|---|---|---|---|
-| SSH | TCP | 22 | your IP | Ansible + operator access |
-| HTTP | TCP | 80 | 0.0.0.0/0 | Public application access (via Swarm ingress) |
-| Custom TCP | TCP | 3000 | your IP | Grafana UI (admin/RmitMonitor2767!) |
-| Custom TCP | TCP | 9090 | your IP | Prometheus UI (debugging only) |
+| Custom TCP | TCP | 9100 | prod-manager SG | Central Prometheus scrapes staging node_exporter |
+| Custom TCP | TCP | 80 | 0.0.0.0/0 | Public app + blackbox probes from prod manager |
+| SSH | TCP | 22 | Jenkins SG | Ansible |
 
-### Staging (single EC2) SG
+### Monitoring (Grafana) SG
 
-Same as above minus the swarm ports (2377/7946/4789) since staging isn't a swarm. Loki 3100 not needed either (no remote promtails).
+| Type | Protocol | Port | Source | Why |
+|---|---|---|---|---|
+| Custom TCP | TCP | 3000 | 0.0.0.0/0 (or your admin IP) | Grafana UI |
+| SSH | TCP | 22 | Jenkins SG | Ansible |
 
-### IAM role attached to each EC2 (via instance profile)
+Egress: to prod-manager SG on 9090 + 3100 (default allow-all egress is fine).
 
-`LabRole` (or equivalent) with these permissions:
+### Jenkins SG
+
+Outbound: to every other SG on 22 (SSH). Inbound: 8080 from admin IP + GitHub webhook (open 8080 to 0.0.0.0/0 or GitHub's IP ranges).
+
+### IAM role attached to each EC2
+
+`LabRole` (or equivalent) with:
 - `sts:GetCallerIdentity`
-- `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer` (all EC2s pull images)
-- `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` on `meowgang-media-staging-01` (backend uploads product images)
+- `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`
+- `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` on `meowgang-media-staging-01`
 
-Missing the IAM role is the second most common startup failure — `aws sts get-caller-identity` fails inside the container and boto3 refuses to init.
+Not needed on Grafana EC2 (doesn't pull ECR images or touch S3).
 
 ---
 
@@ -227,340 +259,66 @@ Missing the IAM role is the second most common startup failure — `aws sts get-
 
 | Credential ID | Type | Purpose |
 |---|---|---|
-| `staging-ec2-ssh-key` | SSH private key | ec2-user login on ALL environments (staging + prod fleet). Public half must be on the EC2 at provision time. |
-| `staging-postgres-password` | Secret text | Postgres password used in staging + prod (same value for now — swap to per-env before submission) |
-| `staging-django-secret-key` | Secret text | Django SECRET_KEY (same story) |
-| `jenkins-smtp-gmail` | Username with password | Gmail SMTP auth. Username = bot Gmail address, password = 16-char Gmail App Password. Used by Extended E-mail Notification globally. |
-| `personal-email-recipients` | Secret text | Where failure emails go DURING TESTING. Value = your personal Gmail. |
-| `jenkins-failure-email-recipients` | Secret text | Where failure emails go IN PRODUCTION. Value = team distribution list. Swap this into the Jenkinsfile in place of `personal-email-recipients` before submission. |
+| `staging-ec2-ssh-key` | SSH private key | ec2-user login on ALL environments |
+| `staging-postgres-password` | Secret text | Postgres password (same for staging + prod for now) |
+| `staging-django-secret-key` | Secret text | Django SECRET_KEY |
+| `jenkins-smtp-gmail` | Username with password | Gmail SMTP auth (App Password) |
+| `personal-email-recipients` | Secret text | Failure emails during dev (personal Gmail) |
+| `jenkins-failure-email-recipients` | Secret text | Failure emails in "prod" (team distribution list) |
 
 ---
 
 ## GitHub webhook → Jenkins
 
-The main pipeline (`Jenkinsfile`) is push-triggered via `triggers { githubPush() }`. That block does nothing by itself — GitHub has to be told where to POST when a push happens, and Jenkins has to be reachable from GitHub's servers.
+Every pipeline uses `triggers { githubPush() }`. GitHub POSTs to
+`http://<jenkins-ip>:8080/github-webhook/` on every push and Jenkins
+runs the matching jobs (matched by SCM URL + branch).
 
-### One-time setup
-
-**1. Jenkins side (plugin + endpoint)**
-
-- **Manage Jenkins → Plugins**: verify **GitHub plugin** is installed (usually shipped with the "Blue Ocean" bundle).
-- Jenkins automatically exposes `POST /github-webhook/` when the plugin is enabled. Nothing to configure in Jenkins itself for the plain webhook path.
-- Each pipeline job that should react to pushes must have **"GitHub hook trigger for GITScm polling"** ticked under Build Triggers (this is what the `triggers { githubPush() }` declarative block enables when using "Pipeline script from SCM").
-
-**2. GitHub side (webhook)**
-
-Fork's repo → **Settings → Webhooks → Add webhook**:
-
-| Field | Value |
-|---|---|
-| Payload URL | `http://<jenkins-public-ip>:8080/github-webhook/` (trailing slash matters) |
-| Content type | `application/json` |
-| Secret | (leave blank for the demo; add a shared secret + configure it in Jenkins for real prod) |
-| Which events | "Just the push event" |
-| Active | ✅ |
-
-Click **Add webhook**. GitHub sends a ping — should return HTTP 200. If it returns 403/404/timeout, the URL or Jenkins auth is wrong.
-
-**3. Verify**
-
-Push any commit → GitHub → Webhook page → "Recent Deliveries" tab → most recent delivery shows `200 OK` and Jenkins triggers a build within a few seconds.
-
-### The IP-stability problem
-
-Jenkins is running on an EC2 instance. AWS assigns a **new public IP every time the instance stops → starts** (a reboot keeps the IP; a stop/start does not). Consequences:
-
-- Webhook payload URL points at the old IP → GitHub POSTs into the void → **no builds are triggered on push** and no error is obvious (GitHub reports timeout in "Recent Deliveries", but if you're not looking, you'll just wonder why the pipeline isn't running).
-- Manual fix each time: edit the webhook, replace the IP, save.
-
-### Solutions
-
-Three options, in the order I'd try them.
-
-#### Option 1 — Allocate an Elastic IP (recommended)
-
-Elastic IPs (EIP) are static public IPv4 addresses in AWS. They stay associated with the instance across stop/start.
-
-**Cost**: free while attached to a running instance. Charged only when the EIP is unassociated (e.g., instance terminated). AWS typically allows a small quota by default; Learner Lab usually allows at least one EIP.
-
-**Steps**:
-1. AWS Console → EC2 → **Elastic IPs** → **Allocate Elastic IP address** → allocate.
-2. Select the new EIP → **Actions → Associate Elastic IP address** → pick the Jenkins instance → Associate.
-3. Update the GitHub webhook's Payload URL to `http://<elastic-ip>:8080/github-webhook/` — this is the LAST time you should have to touch it.
-4. Update Jenkins global config's "System Admin e-mail address" and any documented URLs that reference Jenkins.
-
-After this, stop/start the Jenkins EC2 as many times as you want — the public IP stays the same.
-
-**Note**: if you terminate the Jenkins instance you must re-associate the EIP with its replacement (or release the EIP to avoid the small hourly charge for an unassociated one).
-
-You can lower the interval (`H/1` = ~1 min) but not below because GitHub API rate limits.
-
-#### Option 2 — Use a stable DNS name
-
-If you have a domain, point an A record at the Jenkins EIP (or a CNAME at the AWS-generated `ec2-…compute-1.amazonaws.com` hostname — but the CNAME-target also changes on stop/start, so this only helps with EIP).
-
-The GitHub webhook then uses `http://jenkins.mydomain.com/github-webhook/` and doesn't need touching even if the underlying IP moves.
-
-For this assessment: overkill. Option 1 is enough.
-
-### Recommended action
-
-Do **Option 1 right now** — takes 2 minutes in the AWS console, and permanently removes an annoying failure mode that would otherwise silently break the "push-to-deploy" story every time the Jenkins instance is stopped for cost/lab reasons.
-
-Document in the report: "The Jenkins host is assigned an Elastic IP so that the GitHub webhook survives instance stop/start cycles, which is a common issue in academic AWS Learner Lab environments where instances are shut down at the end of each session."
+**IP stability**: allocate an **Elastic IP** to the Jenkins EC2 so
+stop/start doesn't invalidate the webhook URL. In Learner Lab this is
+free while the instance is running.
 
 ---
 
-## Provisioning a fresh staging EC2 — end-to-end
+## Provisioning end-to-end (order matters)
 
-1. In AWS console, launch a `t3.small` EC2 with:
-   - Amazon Linux 2023 AMI
-   - Public IP enabled
-   - Key pair whose PRIVATE half is stored in Jenkins credential `staging-ec2-ssh-key`
-   - Attached to a SG open on 22, 80, 3000, 9090 (from your IP) + 9100 self-ref
-   - IAM instance profile with ECR read + S3 access
-2. Note the public IP and private IP.
-3. In Jenkins, open `Configure-rmit-store-sever-staging` → **Build with Parameters**:
-   - `STAGING_PUBLIC_IP` = public IP
-   - `STAGING_PRIVATE_IP` = private IP
-   - Build
-4. When green, browse `http://<public-ip>:3000` → login `admin/RmitMonitor2767!` → verify dashboards load.
-5. To deploy the app to this new host, open `Fork-rmit-store-cicd-new` → Build with Parameters → set `STAGING_HOST_IP=<public-ip>` → Build. The pipeline builds + tests + deploys to that IP.
+Launch 4 EC2s (staging, prod-manager, prod-worker-1, prod-worker-2,
++ monitoring), each `t3.small`, Amazon Linux 2023, with the appropriate
+SG (see matrix above). Note each host's **private** IP.
 
-## Provisioning a fresh prod fleet — end-to-end
+Edit the three inventory files with the current private IPs, commit + push. Then run the pipelines in this order:
 
-1. Launch 3 EC2s. Attach them ALL to the same SG that has:
-   - Ports 22, 80 (from anywhere), 3000, 9090 (from your IP)
-   - Ports 2377/tcp, 7946/tcp+udp, 4789/udp — self-referential (SG source = the SG itself)
-   - Ports 3100/tcp, 9100/tcp — self-referential
-   - IAM role (same as staging)
-2. Note all 6 IPs (public + private for each).
-3. In Jenkins, open `Configure-rmit-store-sever-prod` → Build with Parameters → fill in the 6 IPs → Build.
-4. When green, browse `http://<manager-public>:3000` → Grafana should show all 3 hosts under host-resources dashboard.
-5. To deploy the app: open `rmit-store-cicd` → Build with Parameters → set `PROD_MANAGER_IP=<manager-public>` → Build.
+1. `Configure-rmit-store-sever-staging` → Build (uses `staging.ini`)
+2. `Configure-rmit-store-sever-prod` → Build (uses `prod.ini`)
+3. `Configure-rmit-store-sever-monitoring` → Build (uses `monitoring.ini` + reads `prod.ini` for datasources)
+
+Then any `push` to the app repo triggers `rmit-store-cicd` which deploys
+the app to staging then prod.
+
+Verify at the end:
+- Grafana: `http://<monitoring-public-ip>:3000` (`admin` / `RmitMonitor2767!`)
+- Both dashboard folders show data for their env
+- App: `http://<prod-manager-public-ip>/` and `http://<staging-public-ip>/`
 
 ---
 
-## Running Ansible directly from your laptop (CLI fallback)
+## Local Ansible testing (test.sh)
 
-Sometimes you need to invoke a playbook without going through Jenkins — for example when a Jenkins job hasn't been created yet, when Jenkins is unreachable, or when you want to iterate on a single playbook run without waiting for the full pipeline. This section shows the raw `ansible-playbook` commands that the pipelines execute internally.
+`test.sh` at the repo root reproduces every pipeline stage from your
+laptop against fresh EC2s. Fill in the private IPs at the top, ensure
+the SSH key is at `./meowgang-store-staging-key.pem`, then `./test.sh`.
+If everything passes locally, the Jenkins pipelines will succeed too.
 
-### Prerequisites (one-time on your laptop)
-
-```bash
-# Ansible core
-brew install ansible                    # macOS
-# or: sudo apt install ansible          # Ubuntu/Debian
-
-# SSH key file at the repo root, chmod 600
-chmod 600 ./meowgang-store-staging-key.pem
-
-# Sanity check: from repo root, ping any host by its PUBLIC IP
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible all \
-  -i "<HOST_PUBLIC_IP>," \
-  --private-key ./meowgang-store-staging-key.pem \
-  -u ec2-user \
-  -m ping
-# Expected: <ip> | SUCCESS => {"ping": "pong"}
-```
-
-### Gotcha: the trailing comma
-
-`-i "<ip>,"` (with a trailing comma) tells Ansible to treat the argument as an inline single-host inventory. **Without the comma**, Ansible looks for a file named `<ip>` and fails with `"[WARNING]: Unable to parse ... as an inventory source"` followed by `"skipping: no hosts matched"`. Always include the comma.
-
-### Provision a fresh staging EC2
-
-Equivalent to running `Jenkinsfile.provision-staging`. Two playbooks: host bootstrap + monitoring stack.
-
-```bash
-cd /path/to/repo
-
-# 1. Docker + Compose plugin + workspace dir + Grafana swap tuning
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook \
-  -i "<STAGING_PUBLIC_IP>," \
-  --private-key ./meowgang-store-staging-key.pem \
-  -u ec2-user \
-  ansible/setup-hosts.yml
-
-# 2. Central monitoring stack (Prometheus + Grafana + Loki + exporters)
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook \
-  -i "<STAGING_PUBLIC_IP>," \
-  --private-key ./meowgang-store-staging-key.pem \
-  -u ec2-user \
-  -e target_hosts=all \
-  -e role=central \
-  -e env=staging \
-  ansible/monitoring.yml
-```
-
-Verify: `curl http://<STAGING_PUBLIC_IP>:3000/api/health` returns 200.
-
-### Provision the prod fleet — manager first
-
-Order matters: manager must be initialised before workers can join. All 5 commands below need to complete successfully in sequence.
-
-```bash
-cd /path/to/repo
-
-# ---------- 1. Bootstrap Docker on ALL 3 hosts (one playbook, one command) ----------
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook \
-  -i "<MANAGER_PUBLIC_IP>,<WORKER_1_PUBLIC_IP>,<WORKER_2_PUBLIC_IP>," \
-  --private-key ./meowgang-store-staging-key.pem \
-  -u ec2-user \
-  ansible/setup-hosts.yml
-
-# ---------- 2. Initialise Swarm on the manager ----------
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook \
-  -i "<MANAGER_PUBLIC_IP>," \
-  --private-key ./meowgang-store-staging-key.pem \
-  -u ec2-user \
-  -e target_hosts=all \
-  -e advertise_addr=<MANAGER_PRIVATE_IP> \
-  ansible/init-swarm.yml
-
-# ---------- 3. Central monitoring stack on the manager ----------
-# Worker IPs are baked into prometheus.yml scrape targets at render time.
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook \
-  -i "<MANAGER_PUBLIC_IP>," \
-  --private-key ./meowgang-store-staging-key.pem \
-  -u ec2-user \
-  -e target_hosts=all \
-  -e role=central \
-  -e env=prod \
-  -e worker_1_private_ip=<WORKER_1_PRIVATE_IP> \
-  -e worker_2_private_ip=<WORKER_2_PRIVATE_IP> \
-  ansible/monitoring.yml
-
-# ---------- 4. Get the worker join token from the manager ----------
-# The pipeline captures this automatically; from CLI you run it yourself.
-JOIN_TOKEN=$(ssh -i ./meowgang-store-staging-key.pem \
-    ec2-user@<MANAGER_PUBLIC_IP> \
-    'sudo docker swarm join-token worker -q')
-echo "Join token: $JOIN_TOKEN"
-
-# ---------- 5a. Worker 1 — join swarm + install exporters ----------
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook \
-  -i "<WORKER_1_PUBLIC_IP>," \
-  --private-key ./meowgang-store-staging-key.pem \
-  -u ec2-user \
-  -e target_hosts=all \
-  -e manager_private_ip=<MANAGER_PRIVATE_IP> \
-  -e join_token=$JOIN_TOKEN \
-  ansible/join-swarm.yml
-
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook \
-  -i "<WORKER_1_PUBLIC_IP>," \
-  --private-key ./meowgang-store-staging-key.pem \
-  -u ec2-user \
-  -e target_hosts=all \
-  -e role=exporters \
-  -e env=prod \
-  -e manager_private_ip=<MANAGER_PRIVATE_IP> \
-  ansible/monitoring.yml
-
-# ---------- 5b. Worker 2 — same as worker 1 ----------
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook \
-  -i "<WORKER_2_PUBLIC_IP>," \
-  --private-key ./meowgang-store-staging-key.pem \
-  -u ec2-user \
-  -e target_hosts=all \
-  -e manager_private_ip=<MANAGER_PRIVATE_IP> \
-  -e join_token=$JOIN_TOKEN \
-  ansible/join-swarm.yml
-
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook \
-  -i "<WORKER_2_PUBLIC_IP>," \
-  --private-key ./meowgang-store-staging-key.pem \
-  -u ec2-user \
-  -e target_hosts=all \
-  -e role=exporters \
-  -e env=prod \
-  -e manager_private_ip=<MANAGER_PRIVATE_IP> \
-  ansible/monitoring.yml
-```
-
-Verify:
-```bash
-# All 3 nodes joined swarm
-ssh -i ./meowgang-store-staging-key.pem ec2-user@<MANAGER_PUBLIC_IP> \
-    'sudo docker node ls'
-# Expect 3 rows.
-
-# All 3 node_exporters scraped
-curl -s "http://<MANAGER_PUBLIC_IP>:9090/api/v1/query?query=up" | python3 -c "
-import json, sys
-for r in json.load(sys.stdin)['data']['result']:
-    print('  host=%s instance=%s up=%s' % (
-        r['metric'].get('host','-'),
-        r['metric'].get('instance','-'),
-        r['value'][1]))
-"
-# Expect 3 lines all with up=1.
-```
-
-If a worker shows `up=0`, its security group is missing an inbound rule for TCP 9100 from the manager's private IP (or the manager's SG blocks outbound — either direction can be the cause).
-
-### Common failure — dashboard shows only 1 host
-
-The Host Resources dashboard shows only the manager's stats when the workers' `node_exporter` isn't reachable. Symptoms:
-- Grafana Home → Prometheus data source → Query `up` → only 1 series returned
-- Prometheus UI → Status → Targets → workers listed as DOWN with `connection refused` or timeout
-
-Root cause is almost always one of:
-1. **Skipped step** — you ran the central stack against the manager but never ran `role=exporters` against the workers. Fix: run steps 5a and 5b above.
-2. **Security group** — TCP 9100 not open on workers from manager's private IP. Fix in AWS console.
-3. **Wrong worker private IP** — the value you passed to `worker_1_private_ip` at central-stack render time doesn't match the worker's actual private IP. Fix: re-render + reload Prometheus (`docker exec monitoring-prometheus wget -qO- http://localhost:9090/-/reload` or restart the container).
-
-### Deploy the app manually (bypass Jenkins)
-
-```bash
-# STAGING (Compose) — needs env vars for secrets
-cd /path/to/repo
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook \
-  -i "<STAGING_PUBLIC_IP>," \
-  --private-key ./meowgang-store-staging-key.pem \
-  -u ec2-user \
-  -e target_hosts=all \
-  -e aws_region=us-east-1 \
-  -e aws_account_id=<AWS_ACCOUNT_ID> \
-  -e build_commit=<A_REAL_COMMIT_SHA_IN_ECR> \
-  -e app_version=manual \
-  -e postgres_password=<YOUR_PASSWORD> \
-  -e secret_key=<YOUR_DJANGO_SECRET> \
-  -e allowed_hosts='127.0.0.1,localhost,<PRIVATE_IP>,<PUBLIC_IP>' \
-  -e client_url='http://<PUBLIC_IP>' \
-  ansible/deploy-staging.yml
-
-# PROD (Swarm) — same var set, different playbook
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook \
-  -i "<MANAGER_PUBLIC_IP>," \
-  --private-key ./meowgang-store-staging-key.pem \
-  -u ec2-user \
-  -e target_hosts=all \
-  -e aws_region=us-east-1 \
-  -e aws_account_id=<AWS_ACCOUNT_ID> \
-  -e build_commit=<A_REAL_COMMIT_SHA_IN_ECR> \
-  -e app_version=manual \
-  -e postgres_password=<YOUR_PASSWORD> \
-  -e secret_key=<YOUR_DJANGO_SECRET> \
-  -e allowed_hosts='127.0.0.1,localhost,<PRIVATE_IP>,<PUBLIC_IP>' \
-  -e client_url='http://<PUBLIC_IP>' \
-  ansible/deploy-prod-swarm.yml
-```
-
-Manual deploys are useful for one-off tests but should NOT replace the Jenkins pipeline for regular workflow — the pipeline enforces the CI gates (tests + build + ECR publish) that these commands skip.
+Note: `test.sh` runs from your laptop, which is OUTSIDE the VPC. It
+falls back to public IPs for SSH connectivity, but private IPs for
+scrape targets / promtail push URLs (via inventory). Jenkins runs
+inside the VPC and uses private IPs everywhere.
 
 ---
 
 ## Known TODOs before submission
 
-- Swap `personal-email-recipients` → `jenkins-failure-email-recipients` in the Jenkinsfile `post { failure {} }` and `post { fixed {} }` blocks.
-- `stack.prod.yml` `AWS_STORAGE_BUCKET_NAME` still points at `meowgang-media-staging-01`. Provision a dedicated prod bucket and switch it.
-- Consider allocating an Elastic IP to the staging + prod-manager EC2s so a stop/start doesn't invalidate `ALLOWED_HOSTS` and `CLIENT_URL`.
-- `ansible/inventory.ini` still has hardcoded IPs from the original fleet. When you provision a new fleet via the pipeline, either update this file or rely on the `STAGING_HOST_IP` / `PROD_MANAGER_IP` overrides for subsequent deploys.
-
-
-
-#ToDo
-Switch from target_hosts to swarm_manager as we control the swarm node base on inventory as we don't do to for stag, prod
-Switch to 1 Grafana 
+- Swap `personal-email-recipients` → `jenkins-failure-email-recipients` in `Jenkinsfile`'s `post { failure {} }` and `post { fixed {} }`.
+- `stack.prod.yml` `AWS_STORAGE_BUCKET_NAME` still points at `meowgang-media-staging-01`. Provision a dedicated prod bucket.
+- `STAGING_ALLOWED_HOSTS` / `PROD_ALLOWED_HOSTS` in `Jenkinsfile` still hardcode IPs. When an EC2 is replaced, Django will 400 on the health probe. Options: read from inventory at deploy time, or attach EIPs so the public IP never changes.
+- `datasources.yml.j2` embeds prod-manager private IP at render time. If the manager EC2 is replaced, re-run `Jenkinsfile.provision-monitoring` to re-render Grafana's datasources.

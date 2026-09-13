@@ -1,0 +1,174 @@
+/*
+RMIT University Vietnam
+Course: COSC2767/COSC2805 Systems Deployment and Operations
+Semester: 2026B
+Assessment: Assignment 2
+Acknowledgement: Jenkins documentation, Ansible documentation.
+
+Dedicated Grafana EC2 provisioning pipeline. Reads the target host from
+ansible/inventories/monitoring.ini — no IP inputs on the Jenkins UI.
+
+The observability EC2 hosts ONLY Grafana. Prometheus + Loki + blackbox +
+node_exporter + promtail keep living on the prod swarm manager. Grafana
+queries them over the private network (datasources are templated to point
+at the swarm_manager's private IP).
+
+To point at a new/replacement monitoring EC2:
+  1. Edit ansible/inventories/monitoring.ini and set the [monitoring] host's
+     ansible_host= to the new EC2's private IP.
+  2. git commit + push.
+  3. GitHub webhook triggers this pipeline. Idempotent — safe to re-run.
+
+Playbooks executed (against the [monitoring] group):
+  - setup-hosts.yml    Docker + Compose plugin + workspace dir
+  - monitoring.yml     role=grafana — copies compose.grafana.yml, renders
+                       datasources.yml.j2 with the prod-manager's private IP
+                       (looked up from prod.ini), copies dashboards, starts
+                       Grafana.
+
+Prerequisites:
+  - The prod fleet has been provisioned via Jenkinsfile.provision-prod so
+    Prometheus + Loki are already running on the manager and reachable on
+    ports 9090 + 3100.
+  - Both prod.ini and monitoring.ini are up-to-date with current private IPs.
+  - Monitoring EC2's security group allows egress to prod-manager on 9090 +
+    3100. Prod-manager's SG allows inbound 9090 + 3100 from monitoring EC2.
+*/
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+        timeout(time: 20, unit: 'MINUTES')
+    }
+
+    triggers {
+        githubPush()
+    }
+
+    environment {
+        ANSIBLE_NOCOLOR = '1'
+        ANSIBLE_HOST_KEY_CHECKING = 'False'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                deleteDir()
+                checkout scm
+            }
+        }
+
+        stage('Verify SSH to Monitoring Host') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+                        ansible monitoring \
+                            --inventory ansible/inventories/monitoring.ini \
+                            --module-name ping \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}"
+                    '''
+                }
+            }
+        }
+
+        stage('Setup Host (Docker + Compose)') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+                        ansible-playbook \
+                            --inventory ansible/inventories/monitoring.ini \
+                            --limit monitoring \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}" \
+                            ansible/setup-hosts.yml
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Grafana') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+                        # prod.ini is passed so the datasources template can
+                        # look up groups['swarm_manager'][0].ansible_host and
+                        # embed the prod-manager private IP in Grafana's
+                        # Prometheus + Loki URLs. --limit monitoring keeps
+                        # execution on the observability EC2 only.
+                        ansible-playbook \
+                            --inventory ansible/inventories/monitoring.ini \
+                            --inventory ansible/inventories/prod.ini \
+                            --limit monitoring \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}" \
+                            -e target_hosts=monitoring \
+                            -e role=grafana \
+                            -e env=monitoring \
+                            ansible/monitoring.yml
+                    '''
+                }
+            }
+        }
+
+        stage('Report') {
+            steps {
+                script {
+                    def summary = """
+Grafana EC2 provisioning complete — target from ansible/inventories/monitoring.ini
+  - Docker + Compose v2 installed
+  - Grafana running (dashboards + datasources provisioned)
+  - Datasources point at prod-manager Prometheus + Loki over private network
+
+Grafana: http://<monitoring-public-ip>:3000  (admin / RmitMonitor2767!)
+
+Dashboards visible:
+  - RMIT Store Prod       (filters {env="prod"})
+  - RMIT Store Staging    (filters {env="staging"})
+"""
+                    echo summary
+                    writeFile file: 'reports/provision-monitoring-summary.txt', text: summary
+                    archiveArtifacts artifacts: 'reports/provision-monitoring-summary.txt', fingerprint: true
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Grafana EC2 provisioning complete."
+        }
+        failure {
+            echo "Grafana EC2 provisioning FAILED. Inspect the failed stage log. Re-run is safe (playbooks are idempotent)."
+        }
+    }
+}

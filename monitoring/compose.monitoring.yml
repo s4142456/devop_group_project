@@ -9,10 +9,13 @@
 # Acknowledgement: Prometheus, Grafana, Loki, Promtail, blackbox_exporter,
 # node_exporter documentation, and Docker Compose documentation.
 
-# Monitoring stack (Prometheus + Grafana + Loki + Promtail + node_exporter +
-# blackbox_exporter). Sized to fit alongside the RMIT Store application on a
-# t3.small (2 GB RAM). Deployed to /home/ec2-user/monitoring/ by
-# ansible/monitoring.yml.
+# Central monitoring stack on the prod swarm manager: Prometheus + Loki +
+# Promtail + node_exporter + blackbox_exporter. Grafana runs SEPARATELY on
+# a dedicated observability EC2 (see monitoring/compose.grafana.yml) and
+# reaches Prometheus/Loki here over the private network.
+#
+# Deployed to /home/ec2-user/monitoring/ by ansible/monitoring.yml
+# (role=central).
 
 services:
   prometheus:
@@ -36,29 +39,6 @@ services:
       - "host.docker.internal:host-gateway"
     networks:
       - monitoring-net
-
-  grafana:
-    image: grafana/grafana:11.3.0
-    container_name: monitoring-grafana
-    restart: unless-stopped
-    mem_limit: 200m
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: RmitMonitor2767!
-      GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_ANALYTICS_REPORTING_ENABLED: "false"
-      GF_INSTALL_PLUGINS: ""
-    volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-      - grafana-data:/var/lib/grafana
-    ports:
-      - "3000:3000"
-    networks:
-      - monitoring-net
-    depends_on:
-      - prometheus
-      - loki
 
   loki:
     image: grafana/loki:3.2.1
@@ -126,7 +106,6 @@ services:
 
 volumes:
   prometheus-data:
-  grafana-data:
   loki-data:
   promtail-data:
 

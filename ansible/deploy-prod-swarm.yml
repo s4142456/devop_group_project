@@ -14,10 +14,7 @@
 
 ---
 - name: Deploy RMIT Store to production (Docker Swarm)
-  # Default targets the [swarm_manager] group in ansible/inventory.ini. When
-  # the deploy pipeline runs against an ad-hoc single-host inventory (e.g. a
-  # freshly provisioned manager EC2), it passes -e target_hosts=all so this
-  # pattern still matches.
+  # Targets the [swarm_manager] group in ansible/inventories/prod.ini.
   hosts: "{{ target_hosts | default('swarm_manager') }}"
   become: true
   vars:
@@ -26,6 +23,16 @@
     ecr_registry: "{{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com"
     backend_image: "{{ ecr_registry }}/meowgang/rmit-store-backend:{{ build_commit }}"
     frontend_image: "{{ ecr_registry }}/meowgang/rmit-store-frontend:{{ build_commit }}"
+
+    # Django Host header allow-list — built from inventory. Since this play
+    # runs on the swarm manager, ansible_host is the manager's private IP.
+    # public_ip is the manager's ingress public IP (swarm ingress lands here).
+    # Overridable via `-e allowed_hosts=...`.
+    allowed_hosts: "127.0.0.1,localhost,{{ ansible_host }},{{ public_ip | default('') }}"
+
+    # Absolute URL for outbound email links. Falls back to localhost if
+    # public_ip is empty — emails cosmetic, not a deploy blocker.
+    client_url: "http://{{ public_ip | default('localhost') }}"
 
   tasks:
     - name: Ensure app directory exists

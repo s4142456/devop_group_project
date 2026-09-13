@@ -33,16 +33,6 @@ pipeline {
             defaultValue: false,
             description: 'Enable to simulate a deploy that passes CI but fails the staging health check (Django rejects the probe because ALLOWED_HOSTS is broken). Prod deploy stages are then skipped.'
         )
-        string(
-            name: 'STAGING_HOST_IP',
-            defaultValue: '',
-            description: 'Optional: override staging target host IP (public IP). Empty = fall back to ansible/inventory.ini. Set to deploy to a freshly provisioned host without editing inventory.'
-        )
-        string(
-            name: 'PROD_MANAGER_IP',
-            defaultValue: '',
-            description: 'Optional: override prod swarm manager target IP (public IP). Empty = fall back to ansible/inventory.ini [swarm_manager]. Set to deploy to a freshly provisioned fleet without editing inventory.'
-        )
     }
 
     triggers {
@@ -54,12 +44,9 @@ pipeline {
         ANSIBLE_NOCOLOR = '1'
         BACKEND_IMAGE_NAME = 'meowgang/rmit-store-backend'
         FRONTEND_IMAGE_NAME = 'meowgang/rmit-store-frontend'
-        STAGING_ALLOWED_HOSTS = '127.0.0.1,localhost,172.31.8.77,52.3.160.96'
-        STAGING_CLIENT_URL = 'http://52.3.160.96'
-        // TODO: append the prod public IP to PROD_ALLOWED_HOSTS and switch
-        // PROD_CLIENT_URL to the prod public URL once the ELB/EIP is known.
-        PROD_ALLOWED_HOSTS = '127.0.0.1,localhost,172.31.31.88,13.220.98.202'
-        PROD_CLIENT_URL = 'http://3.236.101.7'
+        // ALLOWED_HOSTS + CLIENT_URL are now derived by the deploy playbooks
+        // from ansible/inventories/{staging,prod}.ini (ansible_host +
+        // public_ip). Update those files when EC2 IPs change.
     }
 
     stages {
@@ -118,7 +105,8 @@ pipeline {
                     test -f compose.ci.yml
 
                     test -f ansible/ansible.cfg
-                    test -f ansible/inventory.ini
+                    test -f ansible/inventories/staging.ini
+                    test -f ansible/inventories/prod.ini
                     test -f ansible/setup-hosts.yml
 
                     echo "Required project and test files are present."
@@ -636,19 +624,11 @@ pipeline {
                         mkdir -p reports
                         REPORT_FILE="reports/ansible-staging-connectivity.txt"
 
-                        # Honour STAGING_HOST_IP override so we ping the same
-                        # target the deploy stage will hit. :- default prevents
-                        # "unbound variable" under set -u when the param is empty.
-                        if [ -n "${STAGING_HOST_IP:-}" ]; then
-                            echo "STAGING_HOST_IP=${STAGING_HOST_IP} -> pinging that IP." | tee "${REPORT_FILE}"
-                            PING_ARGS="all --inventory ${STAGING_HOST_IP},"
-                        else
-                            echo "STAGING_HOST_IP empty -> pinging [staging] from ansible/inventory.ini." | tee "${REPORT_FILE}"
-                            PING_ARGS="staging --inventory ansible/inventory.ini"
-                        fi
+                        echo "Pinging [staging] from ansible/inventories/staging.ini." | tee "${REPORT_FILE}"
 
                         set +e
-                        ansible ${PING_ARGS} \
+                        ansible staging \
+                            --inventory ansible/inventories/staging.ini \
                             --module-name ping \
                             --user "${STAGING_SSH_USER}" \
                             --private-key "${STAGING_SSH_KEY}" \
@@ -707,17 +687,18 @@ pipeline {
 
                         test -n "${AWS_ACCOUNT_ID}"
                         test "${AWS_ACCOUNT_ID}" != "None"
+
                         # Demo hook: when DEMO_STAGING_HEALTH_FAILURE is true,
-                        # override ALLOWED_HOSTS with a value Django will reject
+                        # override allowed_hosts with a value Django will reject
                         # so the container health probe fails. Proves that a bad
                         # staging deploy prevents production stages from running.
+                        # Extra-vars have highest precedence in Ansible, so this
+                        # overrides the playbook's inventory-derived default.
+                        DEMO_OVERRIDE=""
                         if [ "${DEMO_STAGING_HEALTH_FAILURE}" = "true" ]; then
                             echo "DEMO_STAGING_HEALTH_FAILURE=true: forcing bad ALLOWED_HOSTS."
-                            EFFECTIVE_ALLOWED_HOSTS="badhost.example.com"
-                        else
-                            EFFECTIVE_ALLOWED_HOSTS="${STAGING_ALLOWED_HOSTS}"
+                            DEMO_OVERRIDE="-e allowed_hosts=badhost.example.com"
                         fi
-
 
                         EXTRA_VARS_FILE="$(mktemp)"
                         trap 'rm -f "${EXTRA_VARS_FILE}"' EXIT
@@ -730,40 +711,21 @@ pipeline {
   "build_commit": "${BUILD_COMMIT}",
   "app_version": "${APP_VERSION}",
   "postgres_password": "${STAGING_POSTGRES_PASSWORD}",
-  "secret_key": "${STAGING_SECRET_KEY}",
-  "allowed_hosts": "${STAGING_ALLOWED_HOSTS}",
-  "client_url": "${STAGING_CLIENT_URL}"
+  "secret_key": "${STAGING_SECRET_KEY}"
 }
 EOF
 
                         mkdir -p reports
                         REPORT_FILE="reports/ansible-deploy-staging.txt"
 
-                        # If STAGING_HOST_IP is set, target that IP directly
-                        # (ad-hoc single-host inventory). Otherwise fall back
-                        # to ansible/inventory.ini's [staging] group.
-                        #
-                        # deploy-staging.yml's `hosts:` is a var that defaults
-                        # to 'staging'. When we override the inventory we pass
-                        # target_hosts=all so the play still matches the one
-                        # inline host.
-                        if [ -n "${STAGING_HOST_IP:-}" ]; then
-                            echo "STAGING_HOST_IP=${STAGING_HOST_IP} -> overriding inventory."
-                            INVENTORY_ARGS="--inventory ${STAGING_HOST_IP},"
-                            HOSTS_OVERRIDE="-e target_hosts=all"
-                        else
-                            echo "STAGING_HOST_IP empty -> using ansible/inventory.ini [staging]."
-                            INVENTORY_ARGS="--inventory ansible/inventory.ini --limit staging"
-                            HOSTS_OVERRIDE=""
-                        fi
-
                         ansible-playbook \
-                            ${INVENTORY_ARGS} \
+                            --inventory ansible/inventories/staging.ini \
+                            --limit staging \
                             --user "${STAGING_SSH_USER}" \
                             --private-key "${STAGING_SSH_KEY}" \
                             --extra-vars "@${EXTRA_VARS_FILE}" \
-                            ${HOSTS_OVERRIDE} \
-                            ansible/deploy-staging.yml \
+                            ${DEMO_OVERRIDE} \
+                            ansible/deploy-staging-swarm.yml \
                             | tee "${REPORT_FILE}"
                     '''
                 }
@@ -796,19 +758,11 @@ EOF
                         mkdir -p reports
                         REPORT_FILE="reports/ansible-prod-connectivity.txt"
 
-                        # Honour PROD_MANAGER_IP override so we ping the same
-                        # target the deploy stage will hit. :- default prevents
-                        # "unbound variable" under set -u when the param is empty.
-                        if [ -n "${PROD_MANAGER_IP:-}" ]; then
-                            echo "PROD_MANAGER_IP=${PROD_MANAGER_IP} -> pinging that IP." | tee "${REPORT_FILE}"
-                            PING_ARGS="all --inventory ${PROD_MANAGER_IP},"
-                        else
-                            echo "PROD_MANAGER_IP empty -> pinging [swarm_manager] from ansible/inventory.ini." | tee "${REPORT_FILE}"
-                            PING_ARGS="swarm_manager --inventory ansible/inventory.ini"
-                        fi
+                        echo "Pinging [swarm_manager] from ansible/inventories/prod.ini." | tee "${REPORT_FILE}"
 
                         set +e
-                        ansible ${PING_ARGS} \
+                        ansible swarm_manager \
+                            --inventory ansible/inventories/prod.ini \
                             --module-name ping \
                             --user "${PROD_SSH_USER}" \
                             --private-key "${PROD_SSH_KEY}" \
@@ -879,37 +833,19 @@ EOF
   "build_commit": "${BUILD_COMMIT}",
   "app_version": "${APP_VERSION}",
   "postgres_password": "${PROD_POSTGRES_PASSWORD}",
-  "secret_key": "${PROD_SECRET_KEY}",
-  "allowed_hosts": "${PROD_ALLOWED_HOSTS}",
-  "client_url": "${PROD_CLIENT_URL}"
+  "secret_key": "${PROD_SECRET_KEY}"
 }
 EOF
 
                         mkdir -p reports
                         REPORT_FILE="reports/ansible-deploy-prod.txt"
 
-                        # If PROD_MANAGER_IP is set, target that IP directly
-                        # (ad-hoc single-host inventory). Otherwise fall back
-                        # to ansible/inventory.ini's [swarm_manager] group.
-                        # Same pattern as staging: pass target_hosts=all when
-                        # overriding so deploy-prod-swarm.yml's hosts pattern
-                        # (which defaults to 'swarm_manager') still matches.
-                        if [ -n "${PROD_MANAGER_IP:-}" ]; then
-                            echo "PROD_MANAGER_IP=${PROD_MANAGER_IP} -> overriding inventory."
-                            INVENTORY_ARGS="--inventory ${PROD_MANAGER_IP},"
-                            HOSTS_OVERRIDE="-e target_hosts=all"
-                        else
-                            echo "PROD_MANAGER_IP empty -> using ansible/inventory.ini [swarm_manager]."
-                            INVENTORY_ARGS="--inventory ansible/inventory.ini --limit swarm_manager"
-                            HOSTS_OVERRIDE=""
-                        fi
-
                         ansible-playbook \
-                            ${INVENTORY_ARGS} \
+                            --inventory ansible/inventories/prod.ini \
+                            --limit swarm_manager \
                             --user "${PROD_SSH_USER}" \
                             --private-key "${PROD_SSH_KEY}" \
                             --extra-vars "@${EXTRA_VARS_FILE}" \
-                            ${HOSTS_OVERRIDE} \
                             ansible/deploy-prod-swarm.yml \
                             | tee "${REPORT_FILE}"
                     '''

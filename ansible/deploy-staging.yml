@@ -11,10 +11,9 @@
 
 ---
 - name: Deploy RMIT Store to staging
-  # Default targets the [staging] group in ansible/inventory.ini. When the
-  # deploy pipeline runs against an ad-hoc single-host inventory (e.g. a
-  # freshly provisioned EC2), it passes -e target_hosts=all so this pattern
-  # still matches.
+  # Targets the [staging] group in ansible/inventories/staging.ini.
+  # Compose-based fallback — the swarm variant (deploy-staging-swarm.yml)
+  # is what the main pipeline uses.
   hosts: "{{ target_hosts | default('staging') }}"
   become: true
   vars:
@@ -22,6 +21,8 @@
     ecr_registry: "{{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com"
     backend_image: "{{ ecr_registry }}/meowgang/rmit-store-backend:{{ build_commit }}"
     frontend_image: "{{ ecr_registry }}/meowgang/rmit-store-frontend:{{ build_commit }}"
+    allowed_hosts: "127.0.0.1,localhost,{{ ansible_host }},{{ public_ip | default('') }}"
+    client_url: "http://{{ public_ip | default('localhost') }}"
 
   tasks:
     - name: Ensure app directory exists

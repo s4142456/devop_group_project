@@ -2,11 +2,11 @@
 # Course: COSC2767|COSC2805 Systems Deployment and Operations
 # Semester: 2026B
 # Assessment: Assignment 2
-# Author: <your name>
-# ID: s<your id>
-# Created date: 10/09/2026
-# Last modified: 10/09/2026
 # Acknowledgement: Grafana provisioning documentation.
+#
+# Rendered by ansible/monitoring.yml (role=grafana). Prometheus and Loki
+# run on the prod swarm manager; Grafana on the dedicated monitoring EC2
+# reaches them over the VPC private network.
 
 apiVersion: 1
 
@@ -15,7 +15,7 @@ datasources:
     uid: prometheus
     type: prometheus
     access: proxy
-    url: http://prometheus:9090
+    url: http://{{ hostvars[groups['swarm_manager'][0]].ansible_host }}:9090
     isDefault: true
     editable: false
 
@@ -23,5 +23,5 @@ datasources:
     uid: loki
     type: loki
     access: proxy
-    url: http://loki:3100
+    url: http://{{ hostvars[groups['swarm_manager'][0]].ansible_host }}:3100
     editable: false

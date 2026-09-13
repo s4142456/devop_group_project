@@ -11,6 +11,8 @@
 
 ---
 - name: Deploy RMIT Store to production
+  # Compose-based fallback — the swarm variant (deploy-prod-swarm.yml) is
+  # what the main pipeline uses.
   hosts: swarm_manager
   become: true
   vars:
@@ -18,6 +20,8 @@
     ecr_registry: "{{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com"
     backend_image: "{{ ecr_registry }}/meowgang/rmit-store-backend:{{ build_commit }}"
     frontend_image: "{{ ecr_registry }}/meowgang/rmit-store-frontend:{{ build_commit }}"
+    allowed_hosts: "127.0.0.1,localhost,{{ ansible_host }},{{ public_ip | default('') }}"
+    client_url: "http://{{ public_ip | default('localhost') }}"
 
   tasks:
     - name: Ensure app directory exists

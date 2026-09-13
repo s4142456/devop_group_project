@@ -29,6 +29,16 @@
     backend_image: "{{ ecr_registry }}/meowgang/rmit-store-backend:{{ build_commit }}"
     frontend_image: "{{ ecr_registry }}/meowgang/rmit-store-frontend:{{ build_commit }}"
 
+    # Django Host header allow-list — built from inventory. Private IP
+    # covers internal probes; public IP covers user browsers. Overridable
+    # via `-e allowed_hosts=...` (used by DEMO_STAGING_HEALTH_FAILURE).
+    allowed_hosts: "127.0.0.1,localhost,{{ ansible_host }},{{ public_ip | default('') }}"
+
+    # Absolute URL embedded in outbound email links (password reset, etc.).
+    # Falls back to localhost if public_ip is empty — emails are cosmetic,
+    # not a deploy blocker.
+    client_url: "http://{{ public_ip | default('localhost') }}"
+
   tasks:
     - name: Ensure app directory exists
       ansible.builtin.file:

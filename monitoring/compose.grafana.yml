@@ -1,0 +1,34 @@
+# RMIT University Vietnam
+# Course: COSC2767|COSC2805 Systems Deployment and Operations
+# Semester: 2026B
+# Assessment: Assignment 2
+# Acknowledgement: Grafana documentation, Docker Compose documentation.
+
+# Grafana-only stack for the dedicated observability EC2. Datasources are
+# provisioned to point at the central Prometheus and Loki running on the
+# prod swarm manager (rendered from datasources.yml.j2 by
+# ansible/monitoring.yml, role=grafana).
+#
+# Deployed to /home/ec2-user/monitoring/ on the monitoring EC2.
+
+services:
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: monitoring-grafana
+    restart: unless-stopped
+    mem_limit: 300m
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: RmitMonitor2767!
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_INSTALL_PLUGINS: ""
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+
+volumes:
+  grafana-data:

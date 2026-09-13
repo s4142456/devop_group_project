@@ -4,8 +4,9 @@
 # Assessment: Assignment 2
 # Acknowledgement: Grafana Promtail documentation.
 #
-# Rendered by ansible/monitoring.yml for a Swarm worker. Ships this host's
-# Docker container logs to the central Loki running on the swarm manager.
+# Rendered by ansible/monitoring.yml for a Swarm worker (or staging).
+# Ships this host's Docker container logs to the central Loki running on
+# the prod swarm manager.
 
 server:
   http_listen_port: 9080
