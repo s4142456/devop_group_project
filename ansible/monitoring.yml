@@ -194,6 +194,15 @@
         - provisioning/dashboards
       when: role == 'grafana'
 
+    - name: Ensure Grafana datasources directory exists
+      ansible.builtin.file:
+        path: "{{ monitoring_dir }}/grafana/provisioning/datasources"
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: '0755'
+      when: role == 'grafana'
+
     - name: Render Grafana datasources (points at prod-manager Prometheus + Loki)
       ansible.builtin.template:
         src: ../monitoring/grafana/provisioning/datasources/datasources.yml.j2
