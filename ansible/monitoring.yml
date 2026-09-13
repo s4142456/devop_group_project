@@ -103,7 +103,7 @@
         mode: '0644'
       when: role == 'central'
 
-    - name: Copy shared configs (loki, promtail, blackbox)
+    - name: Copy shared configs (loki, blackbox)
       ansible.builtin.copy:
         src: "../monitoring/shared/{{ item }}"
         dest: "{{ monitoring_dir }}/{{ item }}"
@@ -112,8 +112,16 @@
         mode: '0644'
       loop:
         - loki-config.yml
-        - promtail-config.yml
         - blackbox.yml
+      when: role == 'central'
+
+    - name: Render shared promtail config (embeds env label)
+      ansible.builtin.template:
+        src: ../monitoring/shared/promtail-config.yml.j2
+        dest: "{{ monitoring_dir }}/promtail-config.yml"
+        owner: ec2-user
+        group: ec2-user
+        mode: '0644'
       when: role == 'central'
 
     - name: Copy Grafana provisioning + dashboards

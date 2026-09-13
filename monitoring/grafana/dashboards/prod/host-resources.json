@@ -1,0 +1,37 @@
+{
+  "title": "Host Resources — Prod",
+  "uid": "rmit-host-resources-prod",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {"from": "now-1h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "CPU usage (%) per host",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "100 - (avg by(host) (irate(node_cpu_seconds_total{env=\"prod\", mode=\"idle\"}[5m])) * 100)", "legendFormat": "{{host}}", "refId": "A"}]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Memory used (%) per host",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "(1 - (node_memory_MemAvailable_bytes{env=\"prod\"} / node_memory_MemTotal_bytes{env=\"prod\"})) * 100", "legendFormat": "{{host}}", "refId": "A"}]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Disk used (%) per host",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "100 - ((node_filesystem_avail_bytes{env=\"prod\", mountpoint=\"/\", fstype=~\"xfs|ext4\"} / node_filesystem_size_bytes{env=\"prod\", mountpoint=\"/\", fstype=~\"xfs|ext4\"}) * 100)", "legendFormat": "{{host}}", "refId": "A"}]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Load average (1m) per host",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "prometheus"}, "expr": "node_load1{env=\"prod\"}", "legendFormat": "{{host}}", "refId": "A"}]
+    }
+  ]
+}

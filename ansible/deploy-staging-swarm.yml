@@ -1,0 +1,116 @@
+# RMIT University Vietnam
+# Course: COSC2767|COSC2805 Systems Deployment and Operations
+# Semester: 2026B
+# Assessment: Assignment 2
+# Author: <your name>
+# ID: s<your id>
+# Created date: 11/09/2026
+# Last modified: 11/09/2026
+# Acknowledgement: Ansible documentation, Docker Swarm documentation,
+# AWS ECR documentation, and team project documentation.
+
+# Deploy the RMIT Store application to the staging host as a Docker Swarm
+# stack. Requires that ansible/init-swarm.yml has been run against this host
+# once to enable Swarm mode.
+#
+# Companion to ansible/deploy-staging.yml (which uses docker compose). Only
+# one of the two should own the staging host at a time. To switch:
+#   compose -> swarm: docker compose -f compose.staging.yml down --remove-orphans
+#   swarm -> compose: docker stack rm rmit-store
+
+---
+- name: Deploy RMIT Store to staging (Docker Swarm)
+  hosts: staging
+  become: true
+  vars:
+    app_dir: /home/ec2-user/app
+    stack_name: rmit-store
+    ecr_registry: "{{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com"
+    backend_image: "{{ ecr_registry }}/meowgang/rmit-store-backend:{{ build_commit }}"
+    frontend_image: "{{ ecr_registry }}/meowgang/rmit-store-frontend:{{ build_commit }}"
+
+  tasks:
+    - name: Ensure app directory exists
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: '0755'
+
+    - name: Copy staging stack file to host
+      ansible.builtin.copy:
+        src: ../stack.staging.yml
+        dest: "{{ app_dir }}/stack.staging.yml"
+        owner: ec2-user
+        group: ec2-user
+        mode: '0644'
+
+    - name: Authenticate Docker to ECR
+      ansible.builtin.shell: >-
+        aws ecr get-login-password --region {{ aws_region }}
+        | docker login --username AWS --password-stdin {{ ecr_registry }}
+      changed_when: false
+      no_log: true
+
+    - name: Deploy the stack to Swarm
+      ansible.builtin.command:
+        chdir: "{{ app_dir }}"
+        cmd: docker stack deploy -c stack.staging.yml {{ stack_name }} --with-registry-auth
+      environment:
+        POSTGRES_PASSWORD: "{{ postgres_password }}"
+        SECRET_KEY: "{{ secret_key }}"
+        ALLOWED_HOSTS: "{{ allowed_hosts }}"
+        CLIENT_URL: "{{ client_url }}"
+        BACKEND_IMAGE: "{{ backend_image }}"
+        FRONTEND_IMAGE: "{{ frontend_image }}"
+        APP_VERSION: "{{ app_version }}"
+        GIT_COMMIT: "{{ build_commit }}"
+      register: stack_deploy
+      changed_when: "'Updating' in stack_deploy.stdout or 'Creating' in stack_deploy.stdout"
+      no_log: true
+
+    - name: Wait for all services to converge to their desired replicas
+      ansible.builtin.shell: |
+        set -e
+        pending=$(docker service ls --filter label=com.docker.stack.namespace={{ stack_name }} \
+          --format '{{ "{{" }}.Name{{ "}}" }} {{ "{{" }}.Replicas{{ "}}" }}' \
+          | awk '{split($2,a,"/"); if (a[1] != a[2]) print $0}')
+        if [ -n "$pending" ]; then
+          echo "$pending"
+          exit 1
+        fi
+        echo converged
+      register: converge
+      retries: 40
+      delay: 5
+      until: converge.rc == 0
+      changed_when: false
+
+    - name: Show final service state
+      ansible.builtin.command: docker stack services {{ stack_name }}
+      register: services
+      changed_when: false
+
+    - name: Print stack services
+      ansible.builtin.debug:
+        var: services.stdout_lines
+
+    - name: Wait for backend health endpoint via frontend
+      ansible.builtin.uri:
+        url: http://127.0.0.1/healthz/
+        status_code: 200
+      register: health_check
+      retries: 30
+      delay: 5
+      until: health_check.status == 200
+
+    - name: Report deployed version
+      ansible.builtin.uri:
+        url: http://127.0.0.1/api/version/
+        return_content: true
+      register: version_check
+
+    - name: Show deployed version
+      ansible.builtin.debug:
+        msg: "Staging (Swarm) deployed version: {{ version_check.content }}"

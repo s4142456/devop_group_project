@@ -2,21 +2,31 @@
 # Course: COSC2767|COSC2805 Systems Deployment and Operations
 # Semester: 2026B
 # Assessment: Assignment 2
-# Author: <your name>
-# ID: s<your id>
-# Created date: 10/09/2026
-# Last modified: 10/09/2026
 # Acknowledgement: Grafana provisioning documentation.
+#
+# Two dashboard folders — one per environment. Each folder loads only its
+# subdirectory of JSON files. The dashboards inside each folder are filtered
+# by an env="prod" or env="staging" label so they only show that env's data.
 
 apiVersion: 1
 
 providers:
-  - name: rmit-store
+  - name: rmit-store-prod
     orgId: 1
-    folder: RMIT Store
+    folder: RMIT Store Prod
     type: file
     disableDeletion: false
     updateIntervalSeconds: 30
     allowUiUpdates: true
     options:
-      path: /var/lib/grafana/dashboards
+      path: /var/lib/grafana/dashboards/prod
+
+  - name: rmit-store-staging
+    orgId: 1
+    folder: RMIT Store Staging
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/staging

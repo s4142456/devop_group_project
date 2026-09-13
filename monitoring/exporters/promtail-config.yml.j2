@@ -30,5 +30,7 @@ scrape_configs:
         target_label: stream
       - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
         target_label: compose_service
+      - target_label: env
+        replacement: '{{ env }}'
       - target_label: host
         replacement: '{{ inventory_hostname }}'

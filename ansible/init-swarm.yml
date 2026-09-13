@@ -7,13 +7,16 @@
 # One-time playbook to enable Docker Swarm mode on the target host as the
 # manager. Idempotent: if Swarm is already active on this node it skips init.
 #
-# Required variables:
-#   target_hosts   inventory group (typically swarm_manager)
+# Variables:
+#   target_hosts   inventory group (defaults to swarm_manager; pass
+#                  target_hosts=staging for the single-node staging swarm)
 #   advertise_addr private IP the manager advertises for cluster mgmt
+#                  (defaults to ansible_host from the inventory, which for
+#                  our EC2 hosts is the private IP)
 
 ---
 - name: Initialise Docker Swarm on the manager
-  hosts: "{{ target_hosts }}"
+  hosts: "{{ target_hosts | default('swarm_manager') }}"
   become: true
 
   tasks:
@@ -24,7 +27,7 @@
 
     - name: Initialise Docker Swarm
       ansible.builtin.command:
-        cmd: docker swarm init --advertise-addr {{ advertise_addr }}
+        cmd: docker swarm init --advertise-addr {{ advertise_addr | default(ansible_host) }}
       when: swarm_state.stdout != 'active'
       register: swarm_init
 

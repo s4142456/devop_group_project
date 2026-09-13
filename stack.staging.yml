@@ -1,0 +1,149 @@
+# RMIT University Vietnam
+# Course: COSC2767/COSC2805 Systems Deployment and Operations
+# Semester: 2026B
+# Assessment: Assignment 2
+# Author: <your name>
+# ID: s<your id>
+# Created date: 11/09/2026
+# Last modified: 11/09/2026
+# Acknowledgement: Docker Swarm mode documentation, Docker Compose file
+# reference (Swarm-compatible subset).
+
+# Docker Swarm stack for the staging environment (single-node).
+# Deploy with:
+#   docker stack deploy -c stack.staging.yml rmit-store --with-registry-auth
+#
+# Differences from compose.staging.yml (kept as local-dev fallback):
+#   - container_name removed (Swarm names containers itself)
+#   - depends_on.condition removed (Swarm ignores it; healthchecks + restart
+#     policy handle startup ordering)
+#   - restart: unless-stopped moved to deploy.restart_policy
+#   - deploy block adds Swarm-native replicas / update / rollback config
+#
+# All service configuration (images, healthchecks, environment) is otherwise
+# identical to compose.staging.yml so the same image tested by the pipeline is
+# what serves traffic.
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: rmit_store
+      POSTGRES_USER: rmit
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - rmit-store-db-data:/var/lib/postgresql/data
+    networks:
+      - rmit-store-net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U rmit -d rmit_store
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+      update_config:
+        order: stop-first
+        parallelism: 1
+      rollback_config:
+        order: stop-first
+        parallelism: 1
+
+  backend:
+    image: ${BACKEND_IMAGE:?BACKEND_IMAGE must be set}
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.prod
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:?ALLOWED_HOSTS must be set}
+      DATABASE_URL: postgres://rmit:${POSTGRES_PASSWORD}@db:5432/rmit_store
+      CLIENT_URL: ${CLIENT_URL:?CLIENT_URL must be set}
+      SESSION_COOKIE_SECURE: "False"
+      CSRF_COOKIE_SECURE: "False"
+      USE_S3: "True"
+      AWS_STORAGE_BUCKET_NAME: meowgang-media-staging-01
+      AWS_S3_REGION_NAME: us-east-1
+      APP_VERSION: ${APP_VERSION:?APP_VERSION must be set}
+      GIT_COMMIT: ${GIT_COMMIT:?GIT_COMMIT must be set}
+    command:
+      - sh
+      - -c
+      - >-
+        python manage.py migrate &&
+        python manage.py collectstatic --noinput &&
+        gunicorn config.wsgi:application
+        --bind 0.0.0.0:8000
+        --workers 3
+    networks:
+      rmit-store-net:
+        aliases:                                                                                                        
+        - rmit-store-backend 
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen(
+          'http://127.0.0.1:8000/healthz/',
+          timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+      update_config:
+        order: stop-first
+        parallelism: 1
+        failure_action: rollback
+      rollback_config:
+        order: stop-first
+        parallelism: 1
+
+  frontend:
+    image: ${FRONTEND_IMAGE:?FRONTEND_IMAGE must be set}
+    ports:
+      - "80:80"
+    networks:
+      - rmit-store-net
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --quiet
+        - --spider
+        - http://127.0.0.1/
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+      update_config:
+        order: stop-first
+        parallelism: 1
+        failure_action: rollback
+      rollback_config:
+        order: stop-first
+        parallelism: 1
+
+volumes:
+  rmit-store-db-data:
+
+networks:
+  rmit-store-net:

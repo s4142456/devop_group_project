@@ -5,16 +5,25 @@ Semester: 2026B
 Assessment: Assignment 2
 Acknowledgement: Jenkins documentation, Ansible documentation.
 
-Staging provisioning pipeline. Given a fresh EC2 (public + private IP),
-installs Docker, Docker Compose v2 plugin, adds a swap file, and deploys
-the central monitoring stack (Prometheus + Grafana + Loki + Promtail +
-node_exporter + blackbox_exporter). Staging is a single-node Compose host
-that also carries the monitoring stack.
+Staging provisioning pipeline. Reads the target host(s) from
+ansible/inventories/staging.ini — no IP inputs on the Jenkins UI.
 
-Runs only against a target you specify — nothing in inventory.ini is
-modified. After success, the pipeline prints the inventory line you can
-paste into ansible/inventories/staging.ini if you want subsequent
-deployments to target this host by default.
+To add or replace a staging EC2:
+  1. Edit ansible/inventories/staging.ini and update the [staging] group's
+     ansible_host= line to the new EC2's private IP (Jenkins is inside the
+     VPC and connects via private).
+  2. git commit + push.
+  3. GitHub webhook triggers this pipeline. It is idempotent — safe to run
+     against an already-provisioned host.
+
+Playbooks executed (all against the [staging] group):
+  - setup-hosts.yml           Docker + Compose plugin + workspace dir
+  - init-swarm.yml            Single-node Docker Swarm (staging IS its own
+                              manager; advertise_addr defaults to ansible_host)
+  - monitoring.yml            role=exporters — node_exporter + promtail shipping
+                              to the CENTRAL Grafana/Loki on the prod manager.
+                              (See Step 4 of the refactor: central stack lives on
+                              prod manager, staging only runs exporters.)
 */
 
 pipeline {
@@ -27,18 +36,6 @@ pipeline {
         timeout(time: 20, unit: 'MINUTES')
     }
 
-    parameters {
-        string(
-            name: 'STAGING_PUBLIC_IP',
-            defaultValue: '',
-            description: 'Public IP of the target staging EC2 (Ansible SSHes here).'
-        )
-        string(
-            name: 'STAGING_PRIVATE_IP',
-            defaultValue: '',
-            description: 'Private IP of the target staging EC2 (used for host labels and inventory line).'
-        )
-    }
 
     environment {
         ANSIBLE_NOCOLOR = '1'
@@ -54,21 +51,7 @@ pipeline {
             }
         }
 
-        stage('Validate Inputs') {
-            steps {
-                script {
-                    if (!params.STAGING_PUBLIC_IP?.trim()) {
-                        error "STAGING_PUBLIC_IP is required."
-                    }
-                    if (!params.STAGING_PRIVATE_IP?.trim()) {
-                        error "STAGING_PRIVATE_IP is required."
-                    }
-                    echo "Provisioning staging target: public=${params.STAGING_PUBLIC_IP} private=${params.STAGING_PRIVATE_IP}"
-                }
-            }
-        }
-
-        stage('Verify SSH to Target') {
+        stage('Verify SSH to Staging Host(s)') {
             steps {
                 withCredentials([
                     sshUserPrivateKey(
@@ -80,8 +63,8 @@ pipeline {
                     sh '''
                         set -eu
                         export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
-                        ansible all \
-                            --inventory "${STAGING_PUBLIC_IP}," \
+                        ansible staging \
+                            --inventory ansible/inventories/staging.ini \
                             --module-name ping \
                             --user "${SSH_USER}" \
                             --private-key "${SSH_KEY}"
@@ -103,7 +86,8 @@ pipeline {
                         set -euo pipefail
                         export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
                         ansible-playbook \
-                            --inventory "${STAGING_PUBLIC_IP}," \
+                            --inventory ansible/inventories/staging.ini \
+                            --limit staging \
                             --user "${SSH_USER}" \
                             --private-key "${SSH_KEY}" \
                             ansible/setup-hosts.yml
@@ -112,7 +96,7 @@ pipeline {
             }
         }
 
-        stage('Deploy Monitoring Stack') {
+        stage('Init Single-Node Swarm') {
             steps {
                 withCredentials([
                     sshUserPrivateKey(
@@ -124,13 +108,45 @@ pipeline {
                     sh '''
                         set -euo pipefail
                         export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+                        # target_hosts overrides the playbook's default group
+                        # (swarm_manager) so init-swarm runs against [staging].
+                        # advertise_addr defaults to ansible_host (private IP).
                         ansible-playbook \
-                            --inventory "${STAGING_PUBLIC_IP}," \
+                            --inventory ansible/inventories/staging.ini \
+                            --limit staging \
                             --user "${SSH_USER}" \
                             --private-key "${SSH_KEY}" \
-                            -e "target_hosts=all" \
-                            -e "role=central" \
-                            -e "env=staging" \
+                            -e target_hosts=staging \
+                            ansible/init-swarm.yml
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy Monitoring Exporters') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'staging-ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -euo pipefail
+                        export ANSIBLE_CONFIG="${WORKSPACE}/ansible/ansible.cfg"
+                        # Staging runs only node_exporter + promtail — the
+                        # central Prometheus/Grafana/Loki live on the prod
+                        # manager (single-Grafana design, Option B).
+                        ansible-playbook \
+                            --inventory ansible/inventories/staging.ini \
+                            --limit staging \
+                            --user "${SSH_USER}" \
+                            --private-key "${SSH_KEY}" \
+                            -e target_hosts=staging \
+                            -e role=exporters \
+                            -e env=staging \
+                            -e manager_private_ip=${PROD_MANAGER_PRIVATE_IP} \
                             ansible/monitoring.yml
                     '''
                 }
@@ -141,19 +157,16 @@ pipeline {
             steps {
                 script {
                     def summary = """
-Provisioned STAGING host ${params.STAGING_PUBLIC_IP} (private ${params.STAGING_PRIVATE_IP})
+Staging provisioning complete — targets from ansible/inventories/staging.ini
   - Docker + Compose v2 installed
-  - Central monitoring stack running
-  - Grafana:    http://${params.STAGING_PUBLIC_IP}:3000  (admin / RmitMonitor2767!)
-  - Prometheus: http://${params.STAGING_PUBLIC_IP}:9090
+  - Docker Swarm active (single-node)
+  - Monitoring exporters running (node_exporter + promtail)
+  - Metrics + logs shipping to prod manager at ${env.PROD_MANAGER_PRIVATE_IP}
 
-To make this the default staging host, add to ansible/inventories/staging.ini
-under [staging]:
+Central Grafana (viewing staging data too): http://<prod-manager-public-ip>:3000
 
-  meowgang-store-staging ansible_host=${params.STAGING_PRIVATE_IP}
-
-Or trigger the main deploy pipeline with STAGING_HOST_IP=${params.STAGING_PUBLIC_IP}
-to deploy the application to this host without editing inventory.
+Next: push a commit to trigger the main deploy pipeline. It will deploy the
+app to whatever host is currently in [staging].
 """
                     echo summary
                     writeFile file: 'reports/provision-staging-summary.txt', text: summary
@@ -165,7 +178,7 @@ to deploy the application to this host without editing inventory.
 
     post {
         success {
-            echo "Staging provisioning complete for ${params.STAGING_PUBLIC_IP}."
+            echo "Staging provisioning complete."
         }
         failure {
             echo "Staging provisioning FAILED. Inspect the failed stage log. Re-run is safe (playbooks are idempotent)."

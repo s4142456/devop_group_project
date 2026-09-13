@@ -4,36 +4,58 @@
 # Assessment: Assignment 2
 # Acknowledgement: Prometheus documentation, blackbox_exporter documentation.
 #
-# Prometheus scrape config for the PRODUCTION environment.
-# Rendered by ansible/monitoring.yml from a Jinja2 template. The manager runs
-# Prometheus + Grafana + Loki; each worker runs its own node_exporter and
-# promtail. Prometheus scrapes each worker's node_exporter over the swarm
-# private network.
+# Central Prometheus scrape config — runs on the PROD swarm manager and
+# scrapes BOTH the prod fleet and the staging host. Rendered by
+# ansible/monitoring.yml from a Jinja2 template.
+#
+# When installing the central stack, both inventories must be passed to
+# ansible-playbook so groups[] resolves for both envs:
+#   ansible-playbook -i ansible/inventories/prod.ini \
+#                    -i ansible/inventories/staging.ini ...
+#
+# Every scrape target gets an `env` label (prod / staging). Dashboards use
+# {env="prod"} or {env="staging"} to slice the data.
 
 global:
   scrape_interval: 30s
   evaluation_interval: 30s
-  external_labels:
-    env: prod
 
 scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets: ['localhost:9090']
 
-  - job_name: node_exporter
+  # ------- prod hosts (manager + workers) -------
+  - job_name: node_exporter_prod
     static_configs:
       - targets: ['node-exporter:9100']
         labels:
+          env: prod
           host: prod-manager
-      - targets: ['{{ worker_1_private_ip }}:9100']
+{% for h in groups['swarm_workers'] | default([]) %}
+      - targets: ['{{ hostvars[h].ansible_host }}:9100']
         labels:
-          host: prod-worker-1
-      - targets: ['{{ worker_2_private_ip }}:9100']
-        labels:
-          host: prod-worker-2
+          env: prod
+          host: {{ h }}
+{% endfor %}
 
-  - job_name: blackbox_http
+  # ------- staging host(s) -------
+  # Central Prometheus reaches staging over the private network on port 9100.
+  # Staging's security group must allow inbound 9100 from the manager.
+{% if groups['staging'] is defined and groups['staging'] | length > 0 %}
+  - job_name: node_exporter_staging
+    static_configs:
+{% for h in groups['staging'] %}
+      - targets: ['{{ hostvars[h].ansible_host }}:9100']
+        labels:
+          env: staging
+          host: {{ h }}
+{% endfor %}
+{% endif %}
+
+  # ------- blackbox probes -------
+  # Prod app served by swarm ingress on the manager's own port 80.
+  - job_name: blackbox_http_prod
     metrics_path: /probe
     params:
       module: [http_2xx]
@@ -42,6 +64,8 @@ scrape_configs:
           - http://host.docker.internal/healthz/
           - http://host.docker.internal/readyz/
           - http://host.docker.internal/api/version/
+        labels:
+          env: prod
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target
@@ -49,3 +73,27 @@ scrape_configs:
         target_label: instance
       - target_label: __address__
         replacement: blackbox-exporter:9115
+
+{% if groups['staging'] is defined and groups['staging'] | length > 0 %}
+  # Probe staging app over the network on port 80.
+  - job_name: blackbox_http_staging
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+{% for h in groups['staging'] %}
+          - http://{{ hostvars[h].ansible_host }}/healthz/
+          - http://{{ hostvars[h].ansible_host }}/readyz/
+          - http://{{ hostvars[h].ansible_host }}/api/version/
+{% endfor %}
+        labels:
+          env: staging
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+{% endif %}

@@ -2,11 +2,12 @@
 # Course: COSC2767|COSC2805 Systems Deployment and Operations
 # Semester: 2026B
 # Assessment: Assignment 2
-# Author: <your name>
-# ID: s<your id>
-# Created date: 10/09/2026
-# Last modified: 10/09/2026
 # Acknowledgement: Grafana Promtail documentation (Docker service discovery).
+#
+# Promtail config for the CENTRAL monitoring stack (runs on the prod swarm
+# manager). Ships this host's Docker container logs to the co-located Loki.
+# Rendered by ansible/monitoring.yml so `env` reflects which env provisioned
+# this stack (typically env=prod).
 
 server:
   http_listen_port: 9080
@@ -31,3 +32,7 @@ scrape_configs:
         target_label: stream
       - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
         target_label: compose_service
+      - target_label: env
+        replacement: '{{ env }}'
+      - target_label: host
+        replacement: '{{ inventory_hostname }}'
