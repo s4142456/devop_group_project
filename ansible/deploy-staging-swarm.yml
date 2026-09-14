@@ -26,8 +26,10 @@
     app_dir: /home/ec2-user/app
     stack_name: rmit-store
     ecr_registry: "{{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com"
-    backend_image: "{{ ecr_registry }}/meowgang/rmit-store-backend:{{ build_commit }}"
-    frontend_image: "{{ ecr_registry }}/meowgang/rmit-store-frontend:{{ build_commit }}"
+    # backend_repository, frontend_repository and media_bucket_name are
+    # CloudFormation outputs (stack meowgang-a2-infra) passed by Jenkins.
+    backend_image: "{{ ecr_registry }}/{{ backend_repository }}:{{ build_commit }}"
+    frontend_image: "{{ ecr_registry }}/{{ frontend_repository }}:{{ build_commit }}"
 
     # Django Host header allow-list — built from inventory. Private IP
     # covers internal probes; public IP covers user browsers. Overridable
@@ -74,6 +76,7 @@
         CLIENT_URL: "{{ client_url }}"
         BACKEND_IMAGE: "{{ backend_image }}"
         FRONTEND_IMAGE: "{{ frontend_image }}"
+        MEDIA_BUCKET_NAME: "{{ media_bucket_name }}"
         APP_VERSION: "{{ app_version }}"
         GIT_COMMIT: "{{ build_commit }}"
       register: stack_deploy

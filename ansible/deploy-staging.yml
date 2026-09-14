@@ -19,8 +19,10 @@
   vars:
     app_dir: /home/ec2-user/app
     ecr_registry: "{{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com"
-    backend_image: "{{ ecr_registry }}/meowgang/rmit-store-backend:{{ build_commit }}"
-    frontend_image: "{{ ecr_registry }}/meowgang/rmit-store-frontend:{{ build_commit }}"
+    # Pass -e backend_repository=... -e frontend_repository=... (CloudFormation
+    # outputs of stack meowgang-a2-infra) — same values the main pipeline uses.
+    backend_image: "{{ ecr_registry }}/{{ backend_repository }}:{{ build_commit }}"
+    frontend_image: "{{ ecr_registry }}/{{ frontend_repository }}:{{ build_commit }}"
     allowed_hosts: "127.0.0.1,localhost,{{ ansible_host }},{{ public_ip | default('') }}"
     client_url: "http://{{ public_ip | default('localhost') }}"
 

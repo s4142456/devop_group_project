@@ -44,6 +44,10 @@ pipeline {
         ANSIBLE_NOCOLOR = '1'
         BACKEND_IMAGE_NAME = 'meowgang/rmit-store-backend'
         FRONTEND_IMAGE_NAME = 'meowgang/rmit-store-frontend'
+        // ECR repository names and the staging media bucket are NOT set here:
+        // they are read from this CloudFormation stack's outputs (see the
+        // 'Resolve CloudFormation Outputs' stage and Jenkinsfile.provision-infra).
+        INFRA_STACK_NAME = 'meowgang-a2-infra'
         // ALLOWED_HOSTS + CLIENT_URL are now derived by the deploy playbooks
         // from ansible/inventories/{staging,prod}.ini (ansible_host +
         // public_ip). Update those files when EC2 IPs change.
@@ -119,6 +123,8 @@ pipeline {
                     test -f ansible/inventories/staging.ini
                     test -f ansible/inventories/prod.ini
                     test -f ansible/setup-hosts.yml
+
+                    test -f infrastructure/cloudformation/main.yaml
 
                     echo "Required project and test files are present."
                 '''
@@ -490,6 +496,75 @@ pipeline {
             }
         }
 
+        stage('Resolve CloudFormation Outputs') {
+            steps {
+                // Canonical source of truth for AWS resource names:
+                // infrastructure/cloudformation/main.yaml -> stack outputs
+                // -> Jenkins env -> Ansible extra vars.
+                sh '''
+                    set -euo pipefail
+                    mkdir -p reports
+
+                    STACK_STATUS="$(aws cloudformation describe-stacks \
+                        --region "${AWS_REGION}" \
+                        --stack-name "${INFRA_STACK_NAME}" \
+                        --query 'Stacks[0].StackStatus' \
+                        --output text)"
+
+                    echo "Stack ${INFRA_STACK_NAME}: ${STACK_STATUS}"
+
+                    case "${STACK_STATUS}" in
+                        CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE) ;;
+                        *)
+                            echo "Stack is not usable. Run Jenkinsfile.provision-infra first."
+                            exit 1
+                            ;;
+                    esac
+
+                    aws cloudformation describe-stacks \
+                        --region "${AWS_REGION}" \
+                        --stack-name "${INFRA_STACK_NAME}" \
+                        --query 'Stacks[0].Outputs[].[OutputKey,OutputValue]' \
+                        --output text \
+                        | tee reports/cloudformation-outputs.txt
+                '''
+
+                script {
+                    def outputs = [:]
+                    for (String line : readFile('reports/cloudformation-outputs.txt').trim().split('\n')) {
+                        def parts = line.trim().split('\t')
+                        if (parts.length == 2) {
+                            outputs[parts[0]] = parts[1]
+                        }
+                    }
+
+                    for (String key : ['BackendRepositoryName', 'FrontendRepositoryName', 'StagingMediaBucketName']) {
+                        if (!outputs[key]) {
+                            error "CloudFormation output ${key} is missing from stack ${env.INFRA_STACK_NAME}."
+                        }
+                    }
+
+                    env.BACKEND_ECR_REPOSITORY = outputs['BackendRepositoryName']
+                    env.FRONTEND_ECR_REPOSITORY = outputs['FrontendRepositoryName']
+                    env.STAGING_MEDIA_BUCKET = outputs['StagingMediaBucketName']
+
+                    echo "Backend ECR repository: ${env.BACKEND_ECR_REPOSITORY}"
+                    echo "Frontend ECR repository: ${env.FRONTEND_ECR_REPOSITORY}"
+                    echo "Staging media bucket: ${env.STAGING_MEDIA_BUCKET}"
+                }
+            }
+
+            post {
+                always {
+                    archiveArtifacts(
+                        allowEmptyArchive: true,
+                        artifacts: 'reports/cloudformation-outputs.txt',
+                        fingerprint: true
+                    )
+                }
+            }
+        }
+
         stage('Publish Images to ECR') {
             steps {
                 sh '''
@@ -509,10 +584,12 @@ pipeline {
                     FRONTEND_LOCAL_COMMIT="${FRONTEND_IMAGE_NAME}:${BUILD_COMMIT}"
                     FRONTEND_LOCAL_BUILD="${FRONTEND_IMAGE_NAME}:build-${BUILD_NUMBER}"
 
-                    BACKEND_ECR_COMMIT="${ECR_REGISTRY}/${BACKEND_IMAGE_NAME}:${BUILD_COMMIT}"
-                    BACKEND_ECR_BUILD="${ECR_REGISTRY}/${BACKEND_IMAGE_NAME}:build-${BUILD_NUMBER}"
-                    FRONTEND_ECR_COMMIT="${ECR_REGISTRY}/${FRONTEND_IMAGE_NAME}:${BUILD_COMMIT}"
-                    FRONTEND_ECR_BUILD="${ECR_REGISTRY}/${FRONTEND_IMAGE_NAME}:build-${BUILD_NUMBER}"
+                    # Repositories come from CloudFormation outputs; local
+                    # image names stay unchanged.
+                    BACKEND_ECR_COMMIT="${ECR_REGISTRY}/${BACKEND_ECR_REPOSITORY}:${BUILD_COMMIT}"
+                    BACKEND_ECR_BUILD="${ECR_REGISTRY}/${BACKEND_ECR_REPOSITORY}:build-${BUILD_NUMBER}"
+                    FRONTEND_ECR_COMMIT="${ECR_REGISTRY}/${FRONTEND_ECR_REPOSITORY}:${BUILD_COMMIT}"
+                    FRONTEND_ECR_BUILD="${ECR_REGISTRY}/${FRONTEND_ECR_REPOSITORY}:build-${BUILD_NUMBER}"
 
                     echo "Authenticating Jenkins to ${ECR_REGISTRY}"
 
@@ -551,35 +628,35 @@ pipeline {
                     }
 
                     push_if_missing \
-                        "${BACKEND_IMAGE_NAME}" \
+                        "${BACKEND_ECR_REPOSITORY}" \
                         "${BUILD_COMMIT}" \
                         "${BACKEND_ECR_COMMIT}"
 
                     push_if_missing \
-                        "${BACKEND_IMAGE_NAME}" \
+                        "${BACKEND_ECR_REPOSITORY}" \
                         "build-${BUILD_NUMBER}" \
                         "${BACKEND_ECR_BUILD}"
 
                     push_if_missing \
-                        "${FRONTEND_IMAGE_NAME}" \
+                        "${FRONTEND_ECR_REPOSITORY}" \
                         "${BUILD_COMMIT}" \
                         "${FRONTEND_ECR_COMMIT}"
 
                     push_if_missing \
-                        "${FRONTEND_IMAGE_NAME}" \
+                        "${FRONTEND_ECR_REPOSITORY}" \
                         "build-${BUILD_NUMBER}" \
                         "${FRONTEND_ECR_BUILD}"
 
                     BACKEND_DIGEST="$(aws ecr describe-images \
                         --region "${AWS_REGION}" \
-                        --repository-name "${BACKEND_IMAGE_NAME}" \
+                        --repository-name "${BACKEND_ECR_REPOSITORY}" \
                         --image-ids "imageTag=${BUILD_COMMIT}" \
                         --query 'imageDetails[0].imageDigest' \
                         --output text)"
 
                     FRONTEND_DIGEST="$(aws ecr describe-images \
                         --region "${AWS_REGION}" \
-                        --repository-name "${FRONTEND_IMAGE_NAME}" \
+                        --repository-name "${FRONTEND_ECR_REPOSITORY}" \
                         --image-ids "imageTag=${BUILD_COMMIT}" \
                         --query 'imageDetails[0].imageDigest' \
                         --output text)"
@@ -722,7 +799,10 @@ pipeline {
   "build_commit": "${BUILD_COMMIT}",
   "app_version": "${APP_VERSION}",
   "postgres_password": "${STAGING_POSTGRES_PASSWORD}",
-  "secret_key": "${STAGING_SECRET_KEY}"
+  "secret_key": "${STAGING_SECRET_KEY}",
+  "backend_repository": "${BACKEND_ECR_REPOSITORY}",
+  "frontend_repository": "${FRONTEND_ECR_REPOSITORY}",
+  "media_bucket_name": "${STAGING_MEDIA_BUCKET}"
 }
 EOF
 
@@ -844,7 +924,9 @@ EOF
   "build_commit": "${BUILD_COMMIT}",
   "app_version": "${APP_VERSION}",
   "postgres_password": "${PROD_POSTGRES_PASSWORD}",
-  "secret_key": "${PROD_SECRET_KEY}"
+  "secret_key": "${PROD_SECRET_KEY}",
+  "backend_repository": "${BACKEND_ECR_REPOSITORY}",
+  "frontend_repository": "${FRONTEND_ECR_REPOSITORY}"
 }
 EOF
 

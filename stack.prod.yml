@@ -21,8 +21,11 @@
 #   - backend network alias 'rmit-store-backend' matches the upstream name
 #     baked into client/nginx.conf so the frontend image works unchanged
 #
-# TODO: point AWS_STORAGE_BUCKET_NAME at a dedicated prod bucket
-# (e.g. meowgang-media-prod-01) once it is provisioned.
+# AWS_STORAGE_BUCKET_NAME intentionally stays on the hand-made
+# meowgang-media-staging-01 bucket: it holds the live product images, and
+# pointing production at a new empty bucket would break them. Migration
+# (copy objects, then switch) is documented in
+# infrastructure/cloudformation/README.md.
 
 services:
   db:

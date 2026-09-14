@@ -21,8 +21,10 @@
     app_dir: /home/ec2-user/app
     stack_name: rmit-store
     ecr_registry: "{{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com"
-    backend_image: "{{ ecr_registry }}/meowgang/rmit-store-backend:{{ build_commit }}"
-    frontend_image: "{{ ecr_registry }}/meowgang/rmit-store-frontend:{{ build_commit }}"
+    # backend_repository and frontend_repository are CloudFormation outputs
+    # (stack meowgang-a2-infra) passed by Jenkins.
+    backend_image: "{{ ecr_registry }}/{{ backend_repository }}:{{ build_commit }}"
+    frontend_image: "{{ ecr_registry }}/{{ frontend_repository }}:{{ build_commit }}"
 
     # Django Host header allow-list — built from inventory. Since this play
     # runs on the swarm manager, ansible_host is the manager's private IP.
