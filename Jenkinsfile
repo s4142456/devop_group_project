@@ -47,6 +47,17 @@ pipeline {
         // ALLOWED_HOSTS + CLIENT_URL are now derived by the deploy playbooks
         // from ansible/inventories/{staging,prod}.ini (ansible_host +
         // public_ip). Update those files when EC2 IPs change.
+
+        // Declared params are only populated in the build's shell environment
+        // when the build is started via "Build with Parameters". A run
+        // started any other way (e.g. the githubPush() trigger below) never
+        // sets it at all, so `${DEMO_STAGING_HEALTH_FAILURE}` under
+        // `set -u` in the Deploy to Staging stage fails with "unbound
+        // variable" before staging is ever touched. Binding it here from
+        // params guarantees it is always a defined "true"/"false" string,
+        // regardless of how the build started, with no change to the
+        // demo behaviour itself.
+        DEMO_STAGING_HEALTH_FAILURE = "${params.DEMO_STAGING_HEALTH_FAILURE}"
     }
 
     stages {
