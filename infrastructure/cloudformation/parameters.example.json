@@ -1,0 +1,9 @@
+[
+  { "ParameterKey": "ProjectName", "ParameterValue": "meowgang" },
+  { "ParameterKey": "BackendRepositoryName", "ParameterValue": "meowgang-a2/rmit-store-backend" },
+  { "ParameterKey": "FrontendRepositoryName", "ParameterValue": "meowgang-a2/rmit-store-frontend" },
+  { "ParameterKey": "ImageRetentionCount", "ParameterValue": "50" },
+  { "ParameterKey": "VpcId", "ParameterValue": "vpc-REPLACE_WITH_STAGING_INSTANCE_VPC" },
+  { "ParameterKey": "AllowedHttpCidr", "ParameterValue": "0.0.0.0/0" },
+  { "ParameterKey": "AllowedSshCidr", "ParameterValue": "172.31.0.0/16" }
+]

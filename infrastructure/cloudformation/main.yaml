@@ -1,0 +1,359 @@
+# RMIT University Vietnam
+# Course: COSC2767|COSC2805 Systems Deployment and Operations
+# Semester: 2026B
+# Assessment: Assignment 2
+# Author: Nhu Phan
+# ID: s4117555
+# Created date: 14/09/2026
+# Last modified: 14/09/2026
+# Acknowledgement: AWS CloudFormation User Guide (AWS::S3::Bucket,
+# AWS::ECR::Repository, AWS::EC2::SecurityGroup references), the security
+# group matrix in PIPELINES.md, and team project documentation. Claude Code
+# (Anthropic) assisted with implementation.
+
+# Reusable AWS infrastructure for the RMIT Store, deployed as the stack
+# meowgang-a2-infra (see infrastructure/cloudformation/README.md).
+#
+# Scope is deliberately incremental. The running EC2 fleet, its security
+# groups, the legacy media bucket (meowgang-media-staging-01, which holds live
+# production images) and the legacy ECR repositories (meowgang/*) were created
+# by hand and are NOT adopted here, so deleting or replacing this stack can
+# never touch them. Every physical name below is new to avoid conflicts.
+
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >-
+  RMIT Store (COSC2767 A2) reusable infrastructure - staging media bucket,
+  backend and frontend ECR repositories, and a codified Docker Swarm node
+  security group. Existing EC2 hosts and legacy resources are not managed.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: meowgang
+    AllowedPattern: '^[a-z0-9][a-z0-9-]{1,20}$'
+    Description: >-
+      Lowercase prefix for physical names and the Project tag. Do not change
+      after creation - it is part of the bucket name, so a change replaces it.
+
+  BackendRepositoryName:
+    Type: String
+    Default: meowgang-a2/rmit-store-backend
+    AllowedPattern: '^[a-z0-9][a-z0-9._/-]{1,100}$'
+    Description: ECR repository the main Jenkins pipeline pushes backend images to.
+
+  FrontendRepositoryName:
+    Type: String
+    Default: meowgang-a2/rmit-store-frontend
+    AllowedPattern: '^[a-z0-9][a-z0-9._/-]{1,100}$'
+    Description: ECR repository the main Jenkins pipeline pushes frontend images to.
+
+  ImageRetentionCount:
+    Type: Number
+    Default: 50
+    MinValue: 10
+    MaxValue: 500
+    Description: >-
+      Images kept per ECR repository. Kept generous so Swarm rollbacks always
+      find the previous image. Safe to change in place.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC shared by Jenkins and the application EC2 hosts.
+
+  AllowedHttpCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    Description: Source CIDR for the public storefront on port 80.
+
+  AllowedSshCidr:
+    Type: String
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    Description: >-
+      Source CIDR for SSH. Jenkins reaches hosts over private IPs, so use the
+      VPC CIDR or an admin /32. 0.0.0.0/0 is rejected.
+
+Rules:
+  SshNotOpenToInternet:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref AllowedSshCidr, '0.0.0.0/0']]
+        AssertDescription: AllowedSshCidr must not be 0.0.0.0/0.
+
+Resources:
+  # --- S3: product media for the staging environment ------------------------
+  # Private bucket. The staging backend serves images through short-lived
+  # pre-signed URLs (AWS_S3_QUERYSTRING_AUTH=True in stack.staging.yml), so no
+  # public read policy is needed. Access comes from the host's LabInstanceProfile.
+  StagingMediaBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ProjectName}-media-staging-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireReplacedMediaVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: staging
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Course
+          Value: COSC2767
+
+  StagingMediaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StagingMediaBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt StagingMediaBucket.Arn
+              - !Sub '${StagingMediaBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # --- ECR: one repository per application image ----------------------------
+  # Same settings as the hand-made meowgang/* repositories (immutable tags,
+  # AES-256), plus scan-on-push and a lifecycle policy.
+  BackendRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Ref BackendRepositoryName
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep the most recent ${ImageRetentionCount} images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": ${ImageRetentionCount}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: shared
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Course
+          Value: COSC2767
+
+  FrontendRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Ref FrontendRepositoryName
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep the most recent ${ImageRetentionCount} images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": ${ImageRetentionCount}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: shared
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Course
+          Value: COSC2767
+
+  # --- Security group: codified Swarm node baseline --------------------------
+  # Mirrors the documented sg-prod rules. Only port 80 is reachable from the
+  # internet. SSH is limited to AllowedSshCidr. Swarm and monitoring ports
+  # accept traffic only from members of this same group.
+  # Not attached to the running instances (see README, Limitations).
+  SwarmNodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RMIT Store Swarm node baseline - HTTP public, SSH restricted, cluster ports self-only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: Public storefront via Swarm ingress
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedHttpCidr
+        - Description: SSH for Jenkins and Ansible
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSshCidr
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-swarm-node-cfn'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: shared
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Course
+          Value: COSC2767
+
+  SwarmManagementIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Swarm cluster management (members only)
+      GroupId: !GetAtt SwarmNodeSecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt SwarmNodeSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 2377
+      ToPort: 2377
+
+  SwarmGossipTcpIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Swarm node gossip TCP (members only)
+      GroupId: !GetAtt SwarmNodeSecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt SwarmNodeSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 7946
+      ToPort: 7946
+
+  SwarmGossipUdpIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Swarm node gossip UDP (members only)
+      GroupId: !GetAtt SwarmNodeSecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt SwarmNodeSecurityGroup.GroupId
+      IpProtocol: udp
+      FromPort: 7946
+      ToPort: 7946
+
+  SwarmOverlayIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Swarm VXLAN overlay network (members only)
+      GroupId: !GetAtt SwarmNodeSecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt SwarmNodeSecurityGroup.GroupId
+      IpProtocol: udp
+      FromPort: 4789
+      ToPort: 4789
+
+  NodeExporterIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Prometheus scrapes node_exporter (members only)
+      GroupId: !GetAtt SwarmNodeSecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt SwarmNodeSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 9100
+      ToPort: 9100
+
+  LokiPushIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: promtail pushes logs to Loki (members only)
+      GroupId: !GetAtt SwarmNodeSecurityGroup.GroupId
+      SourceSecurityGroupId: !GetAtt SwarmNodeSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 3100
+      ToPort: 3100
+
+Outputs:
+  StagingMediaBucketName:
+    Description: Bucket consumed by the staging deploy as AWS_STORAGE_BUCKET_NAME.
+    Value: !Ref StagingMediaBucket
+  StagingMediaBucketArn:
+    Description: ARN of the staging media bucket.
+    Value: !GetAtt StagingMediaBucket.Arn
+  BackendRepositoryName:
+    Description: Backend ECR repository name consumed by the main Jenkins pipeline.
+    Value: !Ref BackendRepository
+  BackendRepositoryUri:
+    Description: Backend ECR repository URI.
+    Value: !GetAtt BackendRepository.RepositoryUri
+  FrontendRepositoryName:
+    Description: Frontend ECR repository name consumed by the main Jenkins pipeline.
+    Value: !Ref FrontendRepository
+  FrontendRepositoryUri:
+    Description: Frontend ECR repository URI.
+    Value: !GetAtt FrontendRepository.RepositoryUri
+  SwarmNodeSecurityGroupId:
+    Description: Codified Swarm node security group (not attached to existing hosts).
+    Value: !GetAtt SwarmNodeSecurityGroup.GroupId

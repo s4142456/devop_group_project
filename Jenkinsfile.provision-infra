@@ -1,0 +1,312 @@
+/*
+RMIT University Vietnam
+Course: COSC2767|COSC2805 Systems Deployment and Operations
+Semester: 2026B
+Assessment: Assignment 2
+Author: Nhu Phan
+ID: s4117555
+Created date: 14/09/2026
+Last modified: 14/09/2026
+Acknowledgement: AWS CloudFormation CLI documentation, Jenkins documentation,
+and team project documentation. Claude Code (Anthropic) assisted with
+implementation.
+
+Infrastructure-as-Code pipeline. Validates and deploys
+infrastructure/cloudformation/main.yaml as the stack meowgang-a2-infra, then
+verifies the real AWS resources it manages. Re-running with no template
+change reports "No changes to deploy", so the pipeline is safe to repeat.
+
+AWS access comes from the Jenkins EC2 instance role (the same one the main
+pipeline uses to push to ECR). No credentials are stored in Jenkins.
+
+Deliberately NOT triggered on push: infrastructure is applied on purpose,
+and the main pipeline only reads this stack's outputs.
+
+Network parameters are resolved, never hard-coded:
+  staging ansible_host (ansible/inventories/staging.ini)
+    -> that instance's VpcId -> the VPC CIDR (used as AllowedSshCidr)
+*/
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+        timeout(time: 20, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(
+            name: 'IMAGE_RETENTION_COUNT',
+            defaultValue: '50',
+            description: 'Images kept per ECR repository (10-500). Changing it is a safe in-place stack update.'
+        )
+    }
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        INFRA_STACK_NAME = 'meowgang-a2-infra'
+        TEMPLATE_FILE = 'infrastructure/cloudformation/main.yaml'
+        ANSIBLE_NOCOLOR = '1'
+        // Parameters are unset on a job's very first run, so fall back to
+        // the template default instead of passing the string "null".
+        IMAGE_RETENTION_COUNT = "${params.IMAGE_RETENTION_COUNT ?: '50'}"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                deleteDir()
+                checkout scm
+            }
+        }
+
+        stage('Validate Template') {
+            steps {
+                sh '''
+                    set -euo pipefail
+                    mkdir -p reports
+
+                    aws --version
+                    echo "Caller: $(aws sts get-caller-identity --query Arn --output text)"
+
+                    aws cloudformation validate-template \
+                        --region "${AWS_REGION}" \
+                        --template-body "file://${TEMPLATE_FILE}" \
+                        | tee reports/cloudformation-validate.json
+
+                    echo "CloudFormation template is valid: ${TEMPLATE_FILE}"
+                '''
+            }
+        }
+
+        stage('Resolve Network Parameters') {
+            steps {
+                script {
+                    env.STAGING_PRIVATE_IP = sh(
+                        returnStdout: true,
+                        script: '''
+                            ansible-inventory \
+                                -i ansible/inventories/staging.ini \
+                                --list \
+                            | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+name = d['staging']['hosts'][0]
+print(d['_meta']['hostvars'][name]['ansible_host'])
+"
+                        '''
+                    ).trim()
+
+                    env.VPC_ID = sh(
+                        returnStdout: true,
+                        script: '''
+                            aws ec2 describe-instances \
+                                --region "${AWS_REGION}" \
+                                --filters "Name=private-ip-address,Values=${STAGING_PRIVATE_IP}" \
+                                --query 'Reservations[0].Instances[0].VpcId' \
+                                --output text
+                        '''
+                    ).trim()
+
+                    if (!env.VPC_ID || env.VPC_ID == 'None') {
+                        error "No EC2 instance found with staging private IP ${env.STAGING_PRIVATE_IP}."
+                    }
+
+                    env.VPC_CIDR = sh(
+                        returnStdout: true,
+                        script: '''
+                            aws ec2 describe-vpcs \
+                                --region "${AWS_REGION}" \
+                                --vpc-ids "${VPC_ID}" \
+                                --query 'Vpcs[0].CidrBlock' \
+                                --output text
+                        '''
+                    ).trim()
+
+                    echo "Staging private IP: ${env.STAGING_PRIVATE_IP}"
+                    echo "VpcId: ${env.VPC_ID}"
+                    echo "AllowedSshCidr (VPC CIDR): ${env.VPC_CIDR}"
+                }
+            }
+        }
+
+        stage('Check Physical Name Conflicts') {
+            steps {
+                sh '''
+                    set -euo pipefail
+
+                    if aws cloudformation describe-stacks \
+                        --region "${AWS_REGION}" \
+                        --stack-name "${INFRA_STACK_NAME}" \
+                        >/dev/null 2>&1
+                    then
+                        echo "Stack ${INFRA_STACK_NAME} exists; its resources are already CloudFormation-owned."
+                        exit 0
+                    fi
+
+                    # First creation: refuse to collide with hand-made resources.
+                    # Names are read from the template defaults, not duplicated here.
+                    template_default() {
+                        aws cloudformation get-template-summary \
+                            --region "${AWS_REGION}" \
+                            --template-body "file://${TEMPLATE_FILE}" \
+                            --query "Parameters[?ParameterKey=='$1'].DefaultValue" \
+                            --output text
+                    }
+
+                    ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+                    BUCKET="$(template_default ProjectName)-media-staging-${ACCOUNT_ID}"
+                    CONFLICT=0
+
+                    for REPO in \
+                        "$(template_default BackendRepositoryName)" \
+                        "$(template_default FrontendRepositoryName)"
+                    do
+                        if aws ecr describe-repositories \
+                            --region "${AWS_REGION}" \
+                            --repository-names "${REPO}" \
+                            >/dev/null 2>&1
+                        then
+                            echo "CONFLICT: ECR repository ${REPO} already exists outside CloudFormation."
+                            CONFLICT=1
+                        else
+                            echo "OK: ECR repository name ${REPO} is free."
+                        fi
+                    done
+
+                    if aws s3api head-bucket --bucket "${BUCKET}" >/dev/null 2>&1; then
+                        echo "CONFLICT: S3 bucket ${BUCKET} already exists outside CloudFormation."
+                        CONFLICT=1
+                    else
+                        echo "OK: S3 bucket name ${BUCKET} is free."
+                    fi
+
+                    test "${CONFLICT}" -eq 0
+                '''
+            }
+        }
+
+        stage('Deploy Stack') {
+            steps {
+                sh '''
+                    set -euo pipefail
+                    mkdir -p reports
+
+                    aws cloudformation deploy \
+                        --region "${AWS_REGION}" \
+                        --template-file "${TEMPLATE_FILE}" \
+                        --stack-name "${INFRA_STACK_NAME}" \
+                        --parameter-overrides \
+                            "VpcId=${VPC_ID}" \
+                            "AllowedSshCidr=${VPC_CIDR}" \
+                            "ImageRetentionCount=${IMAGE_RETENTION_COUNT}" \
+                        --no-fail-on-empty-changeset \
+                        | tee reports/cloudformation-deploy.txt
+
+                    STACK_STATUS="$(aws cloudformation describe-stacks \
+                        --region "${AWS_REGION}" \
+                        --stack-name "${INFRA_STACK_NAME}" \
+                        --query 'Stacks[0].StackStatus' \
+                        --output text)"
+
+                    echo "Stack ${INFRA_STACK_NAME} in ${AWS_REGION}: ${STACK_STATUS}" \
+                        | tee -a reports/cloudformation-deploy.txt
+
+                    case "${STACK_STATUS}" in
+                        CREATE_COMPLETE|UPDATE_COMPLETE) ;;
+                        *) echo "Unexpected stack status."; exit 1 ;;
+                    esac
+                '''
+            }
+        }
+
+        stage('Verify Managed Resources') {
+            steps {
+                sh '''
+                    set -euo pipefail
+                    REPORT_FILE="reports/cloudformation-verify.txt"
+
+                    stack_output() {
+                        aws cloudformation describe-stacks \
+                            --region "${AWS_REGION}" \
+                            --stack-name "${INFRA_STACK_NAME}" \
+                            --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+                            --output text
+                    }
+
+                    BUCKET="$(stack_output StagingMediaBucketName)"
+                    BACKEND_REPO="$(stack_output BackendRepositoryName)"
+                    FRONTEND_REPO="$(stack_output FrontendRepositoryName)"
+                    SG_ID="$(stack_output SwarmNodeSecurityGroupId)"
+
+                    {
+                        echo "== Stack =="
+                        aws cloudformation describe-stacks \
+                            --region "${AWS_REGION}" \
+                            --stack-name "${INFRA_STACK_NAME}" \
+                            --query 'Stacks[0].[StackName,StackStatus,CreationTime,LastUpdatedTime]' \
+                            --output table
+
+                        echo "== Outputs =="
+                        aws cloudformation describe-stacks \
+                            --region "${AWS_REGION}" \
+                            --stack-name "${INFRA_STACK_NAME}" \
+                            --query 'Stacks[0].Outputs[].[OutputKey,OutputValue]' \
+                            --output table
+
+                        echo "== Managed resources =="
+                        aws cloudformation describe-stack-resources \
+                            --region "${AWS_REGION}" \
+                            --stack-name "${INFRA_STACK_NAME}" \
+                            --query 'StackResources[].[LogicalResourceId,ResourceType,PhysicalResourceId,ResourceStatus]' \
+                            --output table
+
+                        echo "== S3: ${BUCKET} =="
+                        aws s3api head-bucket --bucket "${BUCKET}"
+                        echo "head-bucket: bucket exists and is reachable"
+                        aws s3api get-bucket-versioning --bucket "${BUCKET}" --output text
+                        aws s3api get-bucket-encryption --bucket "${BUCKET}" \
+                            --query 'ServerSideEncryptionConfiguration.Rules[].ApplyServerSideEncryptionByDefault.SSEAlgorithm' \
+                            --output text
+                        aws s3api get-public-access-block --bucket "${BUCKET}" --output table
+
+                        echo "== ECR =="
+                        aws ecr describe-repositories \
+                            --region "${AWS_REGION}" \
+                            --repository-names "${BACKEND_REPO}" "${FRONTEND_REPO}" \
+                            --query 'repositories[].[repositoryName,repositoryUri,imageTagMutability,imageScanningConfiguration.scanOnPush]' \
+                            --output table
+
+                        echo "== Security group: ${SG_ID} =="
+                        aws ec2 describe-security-groups \
+                            --region "${AWS_REGION}" \
+                            --group-ids "${SG_ID}" \
+                            --query 'SecurityGroups[0].IpPermissions[].[IpProtocol,FromPort,ToPort,join(`,`,IpRanges[].CidrIp),join(`,`,UserIdGroupPairs[].GroupId)]' \
+                            --output table
+                    } 2>&1 | tee "${REPORT_FILE}"
+
+                    echo "All CloudFormation-managed resources verified."
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts(
+                allowEmptyArchive: true,
+                artifacts: 'reports/cloudformation-*',
+                fingerprint: true
+            )
+        }
+        success {
+            echo "Stack ${env.INFRA_STACK_NAME} is deployed and verified."
+        }
+        failure {
+            echo "Infrastructure pipeline FAILED. Inspect the failed stage. CloudFormation rolls back failed changes, and re-running is safe."
+        }
+    }
+}
