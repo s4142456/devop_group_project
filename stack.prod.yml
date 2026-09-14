@@ -51,7 +51,6 @@ services:
       restart_policy:
         condition: any
         delay: 5s
-        max_attempts: 20
       update_config:
         order: stop-first
         parallelism: 1
@@ -105,14 +104,13 @@ services:
       retries: 12
       start_period: 20s
     deploy:
-      replicas: 1
+      replicas: 2
       placement:
         constraints:
           - node.role == worker
       restart_policy:
         condition: any
         delay: 5s
-        max_attempts: 20
       update_config:
         order: stop-first
         parallelism: 1
@@ -146,7 +144,6 @@ services:
       restart_policy:
         condition: any
         delay: 5s
-        max_attempts: 20
       update_config:
         order: stop-first
         parallelism: 1

@@ -106,20 +106,63 @@
       ansible.builtin.debug:
         var: services.stdout_lines
 
-    - name: Wait for backend health endpoint via frontend
+    - name: Verify no application service is mid-rollback or paused
+      # A converged replica count (previous task) does not prove the update
+      # succeeded — Swarm reports 1/1 even while serving the *previous*
+      # image during a rollback. Catch that here before trusting readyz.
+      ansible.builtin.shell: >-
+        docker service inspect rmit-store_{{ item }}
+        --format '{{ "{{" }}if .UpdateStatus{{ "}}" }}{{ "{{" }}.UpdateStatus.State{{ "}}" }}{{ "{{" }}end{{ "}}" }}'
+      register: update_state
+      changed_when: false
+      loop:
+        - backend
+        - frontend
+      failed_when: "'rollback' in update_state.stdout or 'paused' in update_state.stdout"
+
+    - name: Verify deployed image tag matches the build commit
+      ansible.builtin.shell: >-
+        docker service inspect rmit-store_{{ item }}
+        --format '{{ "{{" }}.Spec.TaskTemplate.ContainerSpec.Image{{ "}}" }}'
+      register: deployed_image
+      changed_when: false
+      failed_when: build_commit not in deployed_image.stdout
+      loop:
+        - backend
+        - frontend
+
+    - name: Wait for readiness endpoint (database + storage) via frontend
+      # readyz, not healthz: healthz only proves the process is alive, not
+      # that it can reach PostgreSQL or S3 — exactly the two dependencies
+      # this deploy is meant to prove.
       ansible.builtin.uri:
-        url: http://127.0.0.1/healthz/
+        url: http://127.0.0.1/readyz/
         status_code: 200
-      register: health_check
+        return_content: true
+        body_format: json
+      register: ready_check
       retries: 30
       delay: 5
-      until: health_check.status == 200
+      until: >-
+        ready_check.status == 200 and
+        ready_check.json.database == 'ok' and
+        ready_check.json.storage == 'ok'
 
     - name: Report deployed version
       ansible.builtin.uri:
         url: http://127.0.0.1/api/version/
         return_content: true
       register: version_check
+
+    - name: Fail unless the deployed commit matches what was requested
+      ansible.builtin.assert:
+        that:
+          - (version_check.content | from_json).commit == build_commit
+        fail_msg: >-
+          Deployed commit {{ (version_check.content | from_json).commit }}
+          does not match requested build_commit {{ build_commit }} —
+          staging is not serving the release this deploy intended.
+        success_msg: "Deployed commit matches build_commit ({{ build_commit }})."
 
     - name: Show deployed version
       ansible.builtin.debug:
