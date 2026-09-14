@@ -8,9 +8,7 @@
 # Last modified: 14/09/2026
 # Acknowledgement: AWS CloudFormation User Guide (AWS::S3::Bucket,
 # AWS::ECR::Repository, AWS::EC2::SecurityGroup references), the security
-# group matrix in PIPELINES.md, and team project documentation. Claude Code
-# (Anthropic) assisted with implementation.
-
+# group matrix in PIPELINES.md, and team project documentation. 
 # Reusable AWS infrastructure for the RMIT Store, deployed as the stack
 # meowgang-a2-infra (see infrastructure/cloudformation/README.md).
 #

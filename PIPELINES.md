@@ -43,8 +43,16 @@ promtail    promtail          promtail
 | `Jenkinsfile.provision-staging` | Provision staging EC2 | GitHub webhook OR manual | `inventories/staging.ini` + reads `prod.ini` (for Loki target) |
 | `Jenkinsfile.provision-prod` | Provision (or grow) prod fleet: 1 manager + N workers | GitHub webhook OR manual | `inventories/prod.ini` + reads `staging.ini` (for scrape config) |
 | `Jenkinsfile.provision-monitoring` | Provision Grafana EC2 | GitHub webhook OR manual | `inventories/monitoring.ini` + reads `prod.ini` (for datasource URLs) |
+| `Jenkinsfile.provision-infra` | Validate + deploy the CloudFormation stack `meowgang-a2-infra` (S3 media bucket, ECR repos, SG) and verify resources | Manual only | `inventories/staging.ini` (to resolve VPC) |
 
-All 4 pipelines run automatically on every push to `main` (via `triggers { githubPush() }`).
+The four original pipelines run automatically on every push to `main` (via `triggers { githubPush() }`). `provision-infra` is manual by design.
+
+### Infrastructure as Code
+
+ECR repository names and the staging media bucket come from CloudFormation stack
+outputs, not from hard-coded values. The main `Jenkinsfile` reads them in its
+**Resolve CloudFormation Outputs** stage and passes them to Ansible. Scope, commands
+and limitations: [`infrastructure/cloudformation/README.md`](infrastructure/cloudformation/README.md).
 
 ### `Jenkinsfile` — main CI/CD
 
@@ -412,7 +420,7 @@ Setup on Github on tab Webohook with `http://<jenkins-ip>:8080/github-webhook/` 
 ## TODOs before submission
 
 - Swap `personal-email-recipients` → `jenkins-failure-email-recipients` in `Jenkinsfile`'s `post { failure {} }` + `post { fixed {} }`.
-- `stack.prod.yml` `AWS_STORAGE_BUCKET_NAME` still points at `meowgang-media-staging-01`. Can provision a dedicated prod bucket.
+- `stack.prod.yml` `AWS_STORAGE_BUCKET_NAME` intentionally stays on the hand-made `meowgang-media-staging-01` (live product images). Staging now uses the CloudFormation-managed bucket. The migration steps are in `infrastructure/cloudformation/README.md`.
 - Allocate Elastic IPs to Jenkins, prod-manager, staging, Grafana (avoids IP-rotation problems).
 - Bump backend's `restart_policy.max_attempts` to 20 in both stack files (matches frontend — survives cold-start DNS race without manual `--force`).
 - Curently, we don't test on init a new worker node then join a exist node swarm at the moment yet 

@@ -16,6 +16,8 @@ Acknowledgement: Official assignment brief; Django, pytest, pytest-django and py
 ## 4. Repository structure
 ## 5. Required environment configuration
 ## 6. AWS provisioning order
+
+Infrastructure as Code (CloudFormation stack `meowgang-a2-infra`: S3 media bucket, ECR repositories, security group) → [`infrastructure/cloudformation/README.md`](infrastructure/cloudformation/README.md). Deploy it with `Jenkinsfile.provision-infra` before running the main pipeline.
 ## 7. Ansible inventory and playbook order
 ## 8. Jenkins installation and configuration
 ## 9. Required Jenkins credentials
